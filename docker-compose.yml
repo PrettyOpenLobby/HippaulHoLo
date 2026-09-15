@@ -1,0 +1,86 @@
+# Janhourou for the OpenLobby core. This file is an OVERRIDE, not a stack of
+# its own: the game is played inside the core's login and authsess processes,
+# so it is applied on top of OpenLobby's compose file, in OpenLobby's project.
+#
+# With both repositories checked out side by side, from this directory:
+#
+#   docker compose --project-directory ../openlobby \
+#       -f ../openlobby/docker-compose.yml -f docker-compose.yml up -d --build
+#
+# (put that in a shell alias or use COMPOSE_FILE; see README.md). It replaces
+# the core's login and authsess images with this one (the core plus the
+# title), adds the parlour listener the client dials on 51272 and, optionally,
+# the live board. Everything else - ports, volumes, the other services - is
+# OpenLobby's.
+#
+# Running Tetra Master as well: build this image on top of CrystalMaster's
+# (OPENLOBBY_IMAGE=crystalmaster:latest, POL_TITLES=tmtitle,jantitle) and
+# stack the three compose files; see README.md, "With Tetra Master".
+
+services:
+  # login builds the title image; authsess and jan consume it. Exactly one
+  # builder, so parallel builds cannot race on the tag.
+  login:
+    image: crystalholo:latest
+    build:
+      context: ../crystalholo
+      args:
+        OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
+    pull_policy: build
+    environment:
+      POL_TITLES: "${POL_TITLES:-jantitle}"
+
+  authsess:
+    image: crystalholo:latest
+    pull_policy: never
+    environment:
+      POL_TITLES: "${POL_TITLES:-jantitle}"
+
+  # THE PARLOUR LISTENER (content id 3's own host, gi003.pol.com:51272): the
+  # zone and table session the client opens beside its auth session. The
+  # hands themselves are played on the auth band, in login and authsess.
+  jan:
+    image: crystalholo:latest
+    pull_policy: never
+    restart: unless-stopped
+    entrypoint: ["python", "janhourou.py", "--serve"]
+    environment:
+      POL_JAN_PORT: "51272"
+      POL_LOG_DIR: /logs
+      POL_DATA_DIR: /data
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "51272:51272"
+    volumes:
+      - ../openlobby/config:/config:ro
+      - pol-data:/data
+      - pol-logs:/logs
+
+  # Optional: the live web board (the five ranking lists, a watch page for
+  # tables that allow it). Standings are a text page out of the box; the
+  # rendered screen and the 3D watch view need art baked from your own
+  # client (README.md, "The live board").
+  #   docker compose ... --profile board up -d
+  board:
+    image: crystalholo:latest
+    pull_policy: never
+    restart: unless-stopped
+    profiles: ["board"]
+    entrypoint: ["python", "polboards.py", "--bind", "0.0.0.0",
+                 "--jan-port", "8791"]
+    environment:
+      POL_ACCOUNTS_DB: /data/accounts.db
+      POL_DATA_DIR: /data
+      POL_BOARDS_STATE_DIR: /state
+      POL_BOARDS_JAN_URL: "${POL_BOARDS_JAN_URL:-}"
+      POL_BOARDS_JAN_DISCORD_WEBHOOK: "${POL_BOARDS_JAN_DISCORD_WEBHOOK:-}"
+      POL_BOARDS_JAN_LIVE_DISCORD_WEBHOOK: "${POL_BOARDS_JAN_LIVE_DISCORD_WEBHOOK:-}"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "127.0.0.1:8791:8791"
+    volumes:
+      - pol-data:/data:ro
+      - jan-board-state:/state
+
+volumes:
+  jan-board-state:
