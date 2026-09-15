@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+# baked from the user's own client: the board's sheets, the ROM font and its
+# traced faces, the 3D watch pieces (see tools/jan_boardfont_build.py and the
+# README's board section); board.json and the OFL faces are tracked
+services/boardart/jan/*.png
+services/boardart/jan/kanji.*
+services/boardart/jan/w3d.json
+services/boardart/jan/janrom-*
+services/boardart/faces/

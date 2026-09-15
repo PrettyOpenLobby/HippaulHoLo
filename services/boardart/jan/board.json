@@ -1,0 +1,1064 @@
+{
+ "about": "JongHoLow (Janhourou) RANKINGS layout: the static layer's rects, the live-text rules, the English strings and the ROM width table, measured off the game's own rankings screen; the sheets it names are baked from the game's files and are not in the repository",
+ "screen": [
+  640,
+  448
+ ],
+ "row_origin": [
+  16,
+  148
+ ],
+ "row_pitch": 20,
+ "rows_per_page": 10,
+ "columns": {
+  "ranking": {
+   "rect": [
+    20,
+    0,
+    32,
+    20
+   ],
+   "style": {
+    "prop": true,
+    "edge": false,
+    "fill": [
+     0,
+     0,
+     0
+    ],
+    "outline": null,
+    "halign": "center",
+    "valign": "center",
+    "font_size": 16,
+    "font_style": [
+     0,
+     0,
+     0,
+     1,
+     0
+    ]
+   }
+  },
+  "ChrName": {
+   "rect": [
+    60,
+    0,
+    160,
+    20
+   ],
+   "style": {
+    "prop": true,
+    "edge": false,
+    "fill": [
+     0,
+     0,
+     0
+    ],
+    "outline": null,
+    "halign": "left",
+    "valign": "center",
+    "font_size": 16,
+    "font_style": [
+     0,
+     0,
+     0,
+     1,
+     0
+    ]
+   }
+  },
+  "ChrLevel": {
+   "rect": [
+    220,
+    0,
+    32,
+    20
+   ],
+   "style": {
+    "prop": false,
+    "edge": false,
+    "fill": [
+     0,
+     0,
+     0
+    ],
+    "outline": null,
+    "halign": "center",
+    "valign": "center",
+    "font_size": 16,
+    "font_style": [
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   }
+  },
+  "Str4": {
+   "rect": [
+    264,
+    0,
+    152,
+    20
+   ],
+   "style": {
+    "prop": true,
+    "edge": false,
+    "fill": [
+     0,
+     0,
+     0
+    ],
+    "outline": null,
+    "halign": "left",
+    "valign": "center",
+    "font_size": 16,
+    "font_style": [
+     0,
+     0,
+     0,
+     1,
+     0
+    ]
+   }
+  },
+  "Str5": {
+   "rect": [
+    428,
+    0,
+    152,
+    20
+   ],
+   "style": {
+    "prop": true,
+    "edge": false,
+    "fill": [
+     0,
+     0,
+     0
+    ],
+    "outline": null,
+    "halign": "left",
+    "valign": "center",
+    "font_size": 16,
+    "font_style": [
+     0,
+     0,
+     0,
+     1,
+     0
+    ]
+   }
+  }
+ },
+ "update": {
+  "rect": [
+   448,
+   62,
+   136,
+   24
+  ],
+  "style": {
+   "prop": false,
+   "edge": true,
+   "fill": [
+    255,
+    255,
+    255
+   ],
+   "outline": [
+    0,
+    0,
+    0
+   ],
+   "halign": "right",
+   "valign": "center",
+   "font_size": 14,
+   "font_style": [
+    0,
+    0,
+    0,
+    0,
+    1
+   ]
+  }
+ },
+ "update_time": {
+  "rect": [
+   526,
+   82,
+   58,
+   24
+  ],
+  "style": {
+   "prop": false,
+   "edge": true,
+   "fill": [
+    255,
+    255,
+    255
+   ],
+   "outline": [
+    0,
+    0,
+    0
+   ],
+   "halign": "right",
+   "valign": "center",
+   "font_size": 14,
+   "font_style": [
+    0,
+    0,
+    0,
+    0,
+    1
+   ]
+  }
+ },
+ "fixups": {
+  "rank_prop": false,
+  "update_rect": [
+   448,
+   42,
+   136,
+   24
+  ],
+  "update_time_rect": [
+   526,
+   60,
+   58,
+   24
+  ],
+  "button_text_rect": [
+   0,
+   6,
+   0,
+   21
+  ],
+  "labels_prop": true,
+  "table": {
+   "rank": [
+    22,
+    72
+   ],
+   "name": 82,
+   "lv": 252,
+   "c4": [
+    288,
+    430,
+    298
+   ],
+   "c5": [
+    446,
+    606
+   ],
+   "kinds": [
+    [
+     "dec",
+     "num"
+    ],
+    [
+     "dec",
+     "text"
+    ],
+    [
+     "num",
+     "num"
+    ],
+    [
+     "num",
+     "num"
+    ],
+    [
+     "",
+     "num"
+    ]
+   ]
+  }
+ },
+ "title": {
+  "text": [
+   "JongHoLow Ranking",
+   "Titles Ranking",
+   "Overall Gamble Ranking",
+   "Weekly Gamble Ranking",
+   "Event Ranking"
+  ],
+  "family": "JanTitle",
+  "font": "jan-title.woff2",
+  "ttf": "jan-title.ttf",
+  "x": 325,
+  "baseline": 95,
+  "size": 30,
+  "max_width": 300,
+  "spacing": 2,
+  "fill": [
+   255,
+   255,
+   255
+  ],
+  "stroke": [
+   50,
+   50,
+   50
+  ],
+  "stroke_px": 3,
+  "shadow": [
+   48,
+   48,
+   32,
+   0.55
+  ],
+  "shadow_dx": 1,
+  "shadow_dy": 2
+ },
+ "status": {
+  "rect": [
+   20,
+   359,
+   600,
+   20
+  ],
+  "style": {
+   "prop": true,
+   "edge": false,
+   "fill": [
+    72,
+    56,
+    40
+   ],
+   "outline": null,
+   "halign": "center",
+   "valign": "center",
+   "font_size": 16,
+   "font_style": [
+    0,
+    0,
+    0,
+    1,
+    0
+   ]
+  }
+ },
+ "strings": {
+  "new": "New",
+  "up": "↑",
+  "same": "-",
+  "down": "↓",
+  "rankfmt": "%s%3d",
+  "namefmt": " %s",
+  "lvfmt": "%2d",
+  "games0fmt": "%10d x",
+  "gamesfmt": "%3d x",
+  "moneyfmt": "%10d",
+  "update": "Update",
+  "bad_title": "Error"
+ },
+ "titles": [
+  "Rookie",
+  "Rich Rookie",
+  "Lonely Rookie",
+  "Lucky Rookie",
+  "Lazy Rookie",
+  "Novice",
+  "Rich Novice",
+  "Sad Novice",
+  "Rare Novice",
+  "Sloppy Novice",
+  "Strong",
+  "Content Strong",
+  "Faux Strong",
+  "Sturdy Strong",
+  "Elite Strong",
+  "Genius",
+  "Noble Genius",
+  "Poor Genius",
+  "Dogged Genius",
+  "Elite Genius",
+  "Master",
+  "Rich Master",
+  "Shy Master",
+  "Rare Master",
+  "Elite Master",
+  "Hero",
+  "Elegant Hero",
+  "Frail Hero",
+  "Peerless Hero",
+  "Loser Hero",
+  "General",
+  "Rich General",
+  "Shabby General",
+  "Tough General",
+  "Weak General",
+  "Great",
+  "Blessed Great",
+  "Phony Great",
+  "Splendid Great",
+  "Elite Great",
+  "Marshal",
+  "Rich Marshal",
+  "So-so Marshal",
+  "Grand Marshal",
+  "Elite Marshal",
+  "Demon",
+  "Graceful Demon",
+  "Fallen Demon",
+  "Fierce Demon",
+  "Elite Demon",
+  "Emperor",
+  "Sated Emperor",
+  "Token Emperor",
+  "Great Emperor",
+  "Would-be Emp.",
+  "Sage",
+  "Elegant Sage",
+  "Dried-up Sage",
+  "Noble Sage",
+  "Elite Sage",
+  "Seiryu",
+  "Rich Seiryu",
+  "Frail Seiryu",
+  "Noble Seiryu",
+  "Painted Seiryu",
+  "Byakko",
+  "Rich Byakko",
+  "Weak Byakko",
+  "Brave Byakko",
+  "Elite Byakko",
+  "Suzaku",
+  "Rich Suzaku",
+  "Sad Suzaku",
+  "Fair Suzaku",
+  "Elite Suzaku",
+  "Genbu",
+  "Rich Genbu",
+  "Scrawny Genbu",
+  "Grand Genbu",
+  "Statue Genbu",
+  "Kirin",
+  "Elegant Kirin",
+  "Feeble Kirin",
+  "Soaring Kirin",
+  "Elite Kirin",
+  "Phoenix",
+  "Calm Phoenix",
+  "Shabby Phoenix",
+  "Fair Phoenix",
+  "Elite Phoenix",
+  "Jan God",
+  "Pure Jan God",
+  "Cheating God",
+  "Ultimate God",
+  "Rude Jan God"
+ ],
+ "widths": [
+  8,
+  55,
+  65,
+  0,
+  0,
+  0,
+  0,
+  0,
+  -128,
+  -128,
+  -128,
+  -128,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  8,
+  6,
+  6,
+  11,
+  9,
+  16,
+  12,
+  5,
+  9,
+  9,
+  12,
+  11,
+  6,
+  10,
+  5,
+  9,
+  11,
+  6,
+  10,
+  10,
+  11,
+  11,
+  11,
+  9,
+  11,
+  11,
+  5,
+  5,
+  11,
+  11,
+  11,
+  9,
+  15,
+  14,
+  11,
+  14,
+  12,
+  9,
+  9,
+  14,
+  11,
+  5,
+  9,
+  10,
+  8,
+  15,
+  11,
+  15,
+  10,
+  15,
+  10,
+  10,
+  9,
+  10,
+  12,
+  16,
+  11,
+  12,
+  11,
+  8,
+  12,
+  8,
+  9,
+  9,
+  7,
+  11,
+  12,
+  11,
+  12,
+  11,
+  7,
+  10,
+  11,
+  4,
+  5,
+  10,
+  4,
+  15,
+  10,
+  12,
+  11,
+  12,
+  7,
+  9,
+  8,
+  10,
+  11,
+  14,
+  10,
+  11,
+  10,
+  8,
+  5,
+  8,
+  9,
+  0
+ ],
+ "space_advance": 8,
+ "alpha": [
+  0,
+  84,
+  188,
+  255,
+  0,
+  84,
+  188,
+  255,
+  0,
+  0,
+  0,
+  0,
+  84,
+  84,
+  84,
+  84
+ ],
+ "edge_passes": [
+  [
+   0,
+   -1
+  ],
+  [
+   0,
+   1
+  ],
+  [
+   -1,
+   0
+  ],
+  [
+   1,
+   1
+  ],
+  [
+   1,
+   1
+  ],
+  [
+   1,
+   1
+  ],
+  [
+   0,
+   1
+  ],
+  [
+   2,
+   0
+  ],
+  [
+   2,
+   1
+  ],
+  [
+   1,
+   2
+  ],
+  [
+   0,
+   2
+  ],
+  [
+   1,
+   -1
+  ],
+  [
+   1,
+   1
+  ],
+  [
+   -1,
+   1
+  ],
+  [
+   -1,
+   -1
+  ]
+ ],
+ "hotspots": {
+  "cats": [
+   [
+    12,
+    380,
+    138,
+    44
+   ],
+   [
+    132,
+    380,
+    138,
+    44
+   ],
+   [
+    252,
+    380,
+    138,
+    44
+   ],
+   [
+    372,
+    380,
+    138,
+    44
+   ],
+   [
+    492,
+    380,
+    138,
+    44
+   ]
+  ],
+  "prev": [
+   120,
+   82,
+   47,
+   32
+  ],
+  "next": [
+   484,
+   82,
+   47,
+   32
+  ]
+ },
+ "bases": [
+  "base_cat0.png",
+  "base_cat1.png",
+  "base_cat2.png",
+  "base_cat3.png",
+  "base_cat4.png"
+ ],
+ "layers": {
+  "bg": "bg.png",
+  "edge_color": "#938170",
+  "buttons": [
+   {
+    "cat": 0,
+    "rect": [
+     12,
+     380,
+     138,
+     44
+    ],
+    "caption": "JongHoLow"
+   },
+   {
+    "cat": 1,
+    "rect": [
+     132,
+     380,
+     138,
+     44
+    ],
+    "caption": "Titles"
+   },
+   {
+    "cat": 2,
+    "rect": [
+     252,
+     380,
+     138,
+     44
+    ],
+    "caption": "Overall Gamble"
+   },
+   {
+    "cat": 3,
+    "rect": [
+     372,
+     380,
+     138,
+     44
+    ],
+    "caption": "Weekly Gamble"
+   },
+   {
+    "cat": 4,
+    "rect": [
+     492,
+     380,
+     138,
+     44
+    ],
+    "caption": "Event"
+   }
+  ],
+  "button_text": [
+   {
+    "prop": false,
+    "edge": false,
+    "fill": [
+     32,
+     32,
+     32
+    ],
+    "outline": null,
+    "halign": "center",
+    "valign": "center",
+    "font_size": 14,
+    "font_style": [
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   {
+    "prop": false,
+    "edge": false,
+    "fill": [
+     16,
+     48,
+     96
+    ],
+    "outline": null,
+    "halign": "center",
+    "valign": "center",
+    "font_size": 14,
+    "font_style": [
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   {
+    "prop": false,
+    "edge": false,
+    "fill": [
+     32,
+     80,
+     32
+    ],
+    "outline": null,
+    "halign": "center",
+    "valign": "center",
+    "font_size": 14,
+    "font_style": [
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   }
+  ],
+  "plates": {
+   "L_Base": {
+    "img": "plate_L_Base.png",
+    "rect": [
+     120,
+     82,
+     47,
+     32
+    ]
+   },
+   "L1": {
+    "img": "plate_L1.png",
+    "rect": [
+     130,
+     86,
+     24,
+     20
+    ]
+   },
+   "R_Base": {
+    "img": "plate_R_Base.png",
+    "rect": [
+     484,
+     82,
+     47,
+     32
+    ]
+   },
+   "R1": {
+    "img": "plate_R1.png",
+    "rect": [
+     494,
+     86,
+     24,
+     20
+    ]
+   }
+  },
+  "headers": {
+   "ranking": {
+    "rect": [
+     30,
+     114,
+     48,
+     24
+    ],
+    "style": {
+     "prop": false,
+     "edge": true,
+     "fill": [
+      255,
+      255,
+      255
+     ],
+     "outline": [
+      0,
+      0,
+      0
+     ],
+     "halign": "left",
+     "valign": "center",
+     "font_size": 16,
+     "font_style": [
+      0,
+      0,
+      0,
+      0,
+      1
+     ]
+    },
+    "text": "Rank"
+   },
+   "ChrName1": {
+    "rect": [
+     76,
+     114,
+     168,
+     24
+    ],
+    "style": {
+     "prop": false,
+     "edge": true,
+     "fill": [
+      255,
+      255,
+      255
+     ],
+     "outline": [
+      0,
+      0,
+      0
+     ],
+     "halign": "left",
+     "valign": "center",
+     "font_size": 16,
+     "font_style": [
+      0,
+      0,
+      0,
+      0,
+      1
+     ]
+    },
+    "text": "Character Name"
+   },
+   "ChrLevel": {
+    "rect": [
+     178,
+     114,
+     84,
+     24
+    ],
+    "style": {
+     "prop": false,
+     "edge": true,
+     "fill": [
+      255,
+      255,
+      255
+     ],
+     "outline": [
+      0,
+      0,
+      0
+     ],
+     "halign": "right",
+     "valign": "center",
+     "font_size": 16,
+     "font_style": [
+      0,
+      0,
+      0,
+      0,
+      1
+     ]
+    },
+    "text": "Lv"
+   },
+   "Str4": {
+    "rect": [
+     276,
+     114,
+     166,
+     24
+    ],
+    "style": {
+     "prop": false,
+     "edge": true,
+     "fill": [
+      255,
+      255,
+      255
+     ],
+     "outline": [
+      0,
+      0,
+      0
+     ],
+     "halign": "left",
+     "valign": "center",
+     "font_size": 16,
+     "font_style": [
+      0,
+      0,
+      0,
+      0,
+      1
+     ]
+    },
+    "text": ""
+   },
+   "Str5": {
+    "rect": [
+     444,
+     114,
+     172,
+     24
+    ],
+    "style": {
+     "prop": false,
+     "edge": true,
+     "fill": [
+      255,
+      255,
+      255
+     ],
+     "outline": [
+      0,
+      0,
+      0
+     ],
+     "halign": "left",
+     "valign": "center",
+     "font_size": 16,
+     "font_style": [
+      0,
+      0,
+      0,
+      0,
+      1
+     ]
+    },
+    "text": ""
+   }
+  },
+  "header_text": [
+   [
+    "Jan Rating",
+    "Total games"
+   ],
+   [
+    "Title score",
+    "Rank"
+   ],
+   [
+    "Games played",
+    "Overall gamble winnings"
+   ],
+   [
+    "Games played",
+    "Weekly gamble winnings"
+   ],
+   [
+    "",
+    "Event game winnings"
+   ]
+  ]
+ }
+}

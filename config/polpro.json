@@ -1,0 +1,289 @@
+{
+  "_README": [
+    "Reply templates for the POLpro plaintext channel (services/polpro.py).",
+    "The file is bind-mounted read-only at /config and re-read whenever its mtime",
+    "changes, so an edit takes effect on the next request: no rebuild, no restart.",
+    "",
+    "FORMAT: {command tag: [entry, ...]}, where each entry is either",
+    "    \"echo\"            splice the request's own groups back into the reply",
+    "    [\"TAG\", [vals]]   an explicit group",
+    "Values may use placeholders:",
+    "    $0..$9     Nth value of the request's FIRST group",
+    "    $TAG.N     Nth value of the request's <TAG> group",
+    "An unknown placeholder resolves to \"0\" rather than failing mid-request.",
+    "",
+    "A key may be prefixed with the game's service tag: `MJS:RR` answers only that",
+    "game's <RR>, while a bare `RR` answers every other game's. Compound keys such",
+    "as `SI+IB` (first group <SI>, carrying an <IB> group) are tried before the",
+    "plain tag, and `*` is the last-resort fallback. Every outbound code needs its",
+    "own entry (`ER`, `BR`, `SI`, `BH`): one that falls to `*` echoes a code the",
+    "client has no handler for, and that screen hangs.",
+    "Set POL_POLPRO=0 for capture-only silence."
+  ],
+  "MJS:RR": [
+    [
+      "RG",
+      [
+        "-8706"
+      ]
+    ]
+  ],
+  "PG": [
+    [
+      "PO",
+      [
+        "$0",
+        "$1",
+        "",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "",
+        "0x0000000000000000",
+        "0x0000000000000000",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+      ]
+    ]
+  ],
+  "MJS:PG": [
+    [
+      "PO",
+      [
+        "$0",
+        "$1",
+        "",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "",
+        "0x0000000000000000",
+        "0x0000000000000000",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+      ]
+    ]
+  ],
+  "MJS:GR": [
+    [
+      "GK",
+      [
+        "0"
+      ]
+    ]
+  ],
+  "RR": [
+    [
+      "OK",
+      [
+        "$PI.0",
+        "0"
+      ]
+    ]
+  ],
+  "*": [
+    "echo",
+    [
+      "OK",
+      [
+        "0"
+      ]
+    ]
+  ],
+  "CR": [
+    [
+      "CS",
+      [
+        "0"
+      ]
+    ]
+  ],
+  "SI+IB": [
+    [
+      "SS",
+      [
+        "U/g/TM0_BIDLIST"
+      ]
+    ],
+    [
+      "SN",
+      [
+        "0"
+      ]
+    ]
+  ],
+  "SI+IO": [
+    [
+      "SS",
+      [
+        "U/g/TM0_EXHIBITLIST"
+      ]
+    ],
+    [
+      "SN",
+      [
+        "0"
+      ]
+    ]
+  ],
+  "ER": [
+    [
+      "EF",
+      [
+        "-8610"
+      ]
+    ]
+  ],
+  "BR": [
+    [
+      "BF",
+      [
+        "-8610"
+      ]
+    ]
+  ],
+  "BH": [
+    [
+      "HF",
+      [
+        "-8610"
+      ]
+    ]
+  ],
+  "SI": [
+    [
+      "SF",
+      [
+        "-8610"
+      ]
+    ]
+  ],
+  "GR": [
+    [
+      "GK",
+      [
+        "0"
+      ]
+    ]
+  ]
+}
