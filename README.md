@@ -42,7 +42,10 @@ docker compose --project-directory ../openlobby \
 
 That rebuilds the core's `login` and `authsess` containers from the
 `crystalholo` image (the core image plus this title), starts the `jan`
-listener on 51272, and leaves everything else the core's. The long command
+listener on 51272, and leaves everything else the core's. The image is
+layered on whatever `openlobby:latest` is on your machine: after pulling a
+newer OpenLobby, rebuild it there first (`docker compose build` in its
+checkout), or this title runs on the old core underneath. The long command
 is the price of running inside the core's project; put it in a shell alias,
 or set `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME` in your environment. To take
 the title out again, run the core's own `docker compose up -d` from its
