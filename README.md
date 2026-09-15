@@ -66,6 +66,22 @@ docker compose --project-directory ../openlobby \
 (or set the two variables in `.env`). Each title serves its own players:
 the lobby lists a console asks for are the title's it is in.
 
+### Without building
+
+The image is published to `ghcr.io/prettyopenlobby/crystalholo` on every push,
+layered on the published OpenLobby image. Apply the pull-only overrides of
+both repositories after their compose files, from this directory:
+
+```
+docker compose --project-directory ../openlobby     -f ../openlobby/docker-compose.yml -f ../openlobby/docker-compose.ghcr.yml     -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+```
+
+`CRYSTALHOLO_TAG` and `OPENLOBBY_TAG` pick the versions (default `latest`). A second image, tagged `with-crystalmaster`, is built on
+CrystalMaster's instead of OpenLobby's: set
+`CRYSTALHOLO_TAG=with-crystalmaster` and `POL_TITLES=tmtitle,jantitle`
+in `.env` to run both PS2 titles from it, with the four overrides
+(OpenLobby's two, then this repository's two).
+
 ## Pointing a client at it
 
 Everything client-side is the core's: DNS redirection (the console asks for
