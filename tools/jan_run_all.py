@@ -36,10 +36,12 @@ SUITES = [
     ("janrules",      [PY, "janrules.py", "--selftest"],       SERVICES, False),
     ("janmahjong",    [PY, "janmahjong.py", "--selftest"],     SERVICES, False),
     ("janmsgs",       [PY, "janmsgs.py", "--selftest"],        SERVICES, False),
+    ("janmsgs2004",   [PY, "janmsgs2004.py"],                  SERVICES, False),
     ("jangame",       [PY, "jangame.py", "--selftest"],        SERVICES, False),
     ("janhourou",     [PY, "janhourou.py", "--selftest"],      SERVICES, False),
     ("janseats",      [PY, "janseats.py", "--selftest"],       SERVICES, False),
     ("janstats",      [PY, "janstats.py", "--selftest"],       SERVICES, False),
+    ("janevent",      [PY, "janevent.py", "--selftest"],       SERVICES, False),
     ("jansave",       [PY, "jansave.py", "--selftest"],        SERVICES, False),
     # the lobby lists (parlour list, room list, PTL, the table record)
     ("janlobby",      [PY, "janlobby.py", "--selftest"],       SERVICES, False),

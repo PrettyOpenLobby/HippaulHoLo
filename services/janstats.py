@@ -268,6 +268,14 @@ def blank(member_id=None):
         #: Sum of uma/oka results, x10 so it stays an integer. `ranking()`
         #: returns one decimal place, and `msg_results` already sends x10.
         "result_x10": 0,
+        #: The all-time JAN balance, a running total with a FLOOR OF ZERO:
+        #: each game adds its result x RATE and a loss stops at 0. No debt
+        #: is carried, so a win after a losing run pays
+        #: out in full. `money_prev` is the balance before the last game, for
+        #: that game's results screen. None = a record from before the balance
+        #: existed; `money_balance` rebuilds it from the history.
+        "money": None,
+        "money_prev": None,
         #: Games that finished in PLUS. The record screen renders
         #: `20 - plus_scores % 20` as progress toward the Winnings General
         #: title, so this is a cumulative COUNT, not a sum.
@@ -284,6 +292,15 @@ def blank(member_id=None):
         "games_week": 0,
         "day": None,
         "week": None,
+        #: The EVENT window, keyed by the running event's id rather than by a
+        #: date: an event opens and closes when the server says so, so a new
+        #: id is what starts everyone at zero. `janevent` owns the id; this is
+        #: profile value v21, the only column the client's Event ranking draws
+        #: besides the name and level (measured 2026-09-21: the games column
+        #: for category 4 is the empty header at 0x0049f130).
+        "result_x10_event": 0,
+        "games_event": 0,
+        "event": None,
         #: Per-yaku win counts, canonical key -> count (`record_win`).
         "yaku": {},
         #: Wins, and wins that were yakuman.
@@ -370,6 +387,16 @@ def note_name(member_id, name):
     return store(member_id, rec)
 
 
+def _event_id(when=None):
+    """The running event's id, or 0. Kept behind a helper so janstats does not
+    hard-depend on janevent: without it there is simply never an event."""
+    try:
+        import janevent
+        return janevent.event_id(when)
+    except Exception:                                       # pragma: no cover
+        return 0
+
+
 def _roll_windows(rec, when=None):
     t = time.gmtime(when if when is not None else time.time())
     day = time.strftime("%Y-%j", t)
@@ -378,7 +405,25 @@ def _roll_windows(rec, when=None):
         rec["day"], rec["result_x10_today"] = day, 0
     if rec.get("week") != week:
         rec["week"], rec["result_x10_week"], rec["games_week"] = week, 0, 0
+    # The event window rolls on the EVENT ID, not on the clock. 0 = no event
+    # running, which also resets it, so winnings never leak from a closed
+    # event into the next one.
+    ev = _event_id(when)
+    if rec.get("event") != ev:
+        rec["event"], rec["result_x10_event"], rec["games_event"] = ev, 0, 0
     return day, week
+
+
+def current_windows(rec, when=None):
+    """A COPY of `rec` with the today / week / event windows rolled to now.
+
+    `record_game` only rolls them when a game is recorded, so a player who
+    does not play the next day was still shown yesterday's winnings as
+    "today" (42,700 JAN "today" from the previous day's game). Every reader
+    goes through this; the file is not written."""
+    rec = dict(rec)
+    _roll_windows(rec, when)
+    return rec
 
 
 def jan_for_points(points):
@@ -411,6 +456,10 @@ def record_game(member_id, place, score, result=0.0, table_id=None, when=None,
     if name:
         rec["name"] = str(name)[:16]
     r10 = int(round(float(result) * 10))
+    # The balance first, while `result_x10` and the history still describe
+    # the record BEFORE this game (`money_balance` may rebuild from them).
+    rec["money_prev"] = money_balance(rec)
+    rec["money"] = max(0, rec["money_prev"] + jan_for_points(r10 / 10.0))
     rec["games_played"] += 1
     rec["places"][place] += 1
     rec["score_total"] += int(score)
@@ -430,6 +479,9 @@ def record_game(member_id, place, score, result=0.0, table_id=None, when=None,
     rec["result_x10_today"] += r10
     rec["result_x10_week"] += r10
     rec["games_week"] = int(rec.get("games_week", 0)) + 1
+    if rec.get("event"):
+        rec["result_x10_event"] += r10
+        rec["games_event"] = int(rec.get("games_event", 0)) + 1
     rec["result_x10_best"] = max(int(rec.get("result_x10_best", 0)),
                                  rec["result_x10_today"])
 
@@ -510,8 +562,11 @@ def recent_places(member_id_or_rec, n=HISTORY_ROWS, skip=0):
 # one place, that the server owner can override per member, and use those SAME
 # numbers on every screen.
 
-#: Games per level, in the placeholder ladder. PARTIAL: invented.
-LEVEL_GAMES = int(os.environ.get("POL_JAN_LEVEL_GAMES", "10"))
+#: Games per level, in the placeholder ladder. PARTIAL: invented; 5 chosen
+#: so it moves at the same pace as the rank ladder
+#: (RANK_TIER_GAMES), which was already a tier every 5 games. It was 10, which
+#: on a server this size meant a player sat on Lv 1 indefinitely.
+LEVEL_GAMES = int(os.environ.get("POL_JAN_LEVEL_GAMES", "5"))
 #: The PTL member row draws `"Lv%2d"`, so two digits is the width the UI expects.
 LEVEL_MAX = int(os.environ.get("POL_JAN_LEVEL_MAX", "99"))
 #: What a fresh player starts with. PARTIAL: invented; 0 is the honest default.
@@ -627,6 +682,25 @@ def money_of(rec, key="result_x10"):
     return jan_for_points(int(rec.get(key, 0)) / 10.0)
 
 
+def money_balance(rec):
+    """The all-time JAN balance: floored at 0 game by game, so a loss never
+    leaves a debt for the next win to pay off (see `blank`).
+
+    A record written before the balance existed has `money` None. Its balance
+    is rebuilt by replaying the history oldest first, with any games older
+    than the history (HISTORY_KEEP) folded in as one opening step."""
+    v = rec.get("money")
+    if isinstance(v, int) and not isinstance(v, bool):
+        return max(0, v)
+    hist = list(reversed(rec.get("history") or []))
+    older = (int(rec.get("result_x10", 0))
+             - sum(int(h.get("result_x10", 0)) for h in hist))
+    bal = max(0, START_MONEY + jan_for_points(older / 10.0))
+    for h in hist:
+        bal = max(0, bal + jan_for_points(int(h.get("result_x10", 0)) / 10.0))
+    return bal
+
+
 def derive(rec):
     """Everything `jansave.FIELDS` and the results screen can ask for.
 
@@ -643,11 +717,12 @@ def derive(rec):
 
     `rec['overrides']` wins over all of it, so a live test can pin any value.
     """
+    rec = current_windows(rec)
     games, places, _r, _a, _t = _facts(rec)
     out = {
         "games_played": games,
         "level": level_of(rec),
-        "money": max(0, START_MONEY + money_of(rec)),
+        "money": money_balance(rec),
         "rank": rank_index_of(rec),
         # measured save fields
         "top_finishes": int(places[0]),
@@ -750,9 +825,30 @@ def summary(member_id):
 # WARNING: THE FLOATS ARE INTEGERS x 1e6 ON THE WIRE: `mg__002f8300` -> atof with no
 # scaling, and every draw site divides by 1e6 (showprof.c:381, ranking_win.c:
 # 352). Sending "2.5" would show 0.000002.
+#
+# WARNING: THAT IS NOT TRUE OF THE 2004 BUILD, MEASURED ON SCREEN 2026-09-21. Its
+# ranking screen drew a fresh player's Jan Rating as `7000000.0` where the
+# value meant is 7.0 -- i.e. it prints what we send, undivided. Neither module
+# even REFERENCES a 1e6 constant: the only 1e6 doubles in either binary
+# (2002 0x4194c8/0x41b148, 2004 0x495998/0x497ef0) have no `ldc1` pointing at
+# them and belong to the C library, and the R5900 has no double FPU anyway.
+# SE's own ranking shot has every rated player at 6.7..9.1, which is the scale
+# `RATING_BASE` was set from, so 7.0 is what the column is meant to read.
+# Both channels serve the 2004 build now, so the default is 1; set
+# POL_JAN_FLOAT_SCALE=1000000 to put the old scaling back for a 2002 client.
+#
+# WARNING: THIS SURVIVED A CHALLENGE, and the challenge is worth keeping.
+# A ranking screenshot showed a rating of 8.423333 drawn as `0.0000079`,
+# which reads exactly like a client dividing by 1e6 -- and it is not. That shot
+# is OUR OWN web reproduction of the screen (`boardjan.render`), which had a
+# hardcoded `/ 1e6` left over from before this knob existed AND truncated the
+# field to an int first: `mailfmt(f32(8) / 1e6, 7)` is `0.0000079`, the `79`
+# coming out of float32 rounding, not out of any 7.9. Fixed in `row_strings`.
+# KEY: Two different wrong scalings can print the same string; before moving THIS
+# constant, run the formatter on the candidate inputs and see which one it is.
 PROFILE_REC = 0xE8
-FLOAT_SCALE = 1000000
-RANK_CATEGORIES = ("Jan Rating", "Title score", "Overall gamble winnings",
+FLOAT_SCALE = int(os.environ.get("POL_JAN_FLOAT_SCALE", "1") or 1)
+RANK_CATEGORIES = ("JongHoLow Rating", "Title score", "Overall gamble winnings",
                    "Weekly gamble winnings", "Event game winnings")
 RANK_SORT_VALUE = {0: 14, 1: 15, 2: 19, 3: 20, 4: 21}     # category -> vN
 RANK_PREV_VALUE = {0: 35, 1: 36, 2: 37, 3: 38, 4: 39}     # category -> vN
@@ -783,10 +879,10 @@ def profile_fields(member_id, name=None, content_id=0, show_flags=None,
     `prev_ranks` is `{category: previous 0-based rank}` for v35..v39; absent
     = -1 = "New".
     """
-    rec = load(member_id)
+    rec = current_windows(load(member_id))
     games, places, _r, avg_place, top_rate = _facts(rec)
     t = rec.get("titles") or {}
-    money = max(0, START_MONEY + money_of(rec))
+    money = money_balance(rec)
     f = {
         0: int(content_id or 0), 1: int(content_id or 0),
         2: (name or rec.get("name") or ""),
@@ -794,14 +890,19 @@ def profile_fields(member_id, name=None, content_id=0, show_flags=None,
         11: money,                          # "Total winnings" (v11, unread --
                                             # showprof.c:400 prints v10; kept
                                             # equal so a fixed client agrees)
-        12: int(round(avg_place * FLOAT_SCALE)),
-        13: int(round(top_rate * FLOAT_SCALE)),
-        14: int(round(rating_of(rec) * FLOAT_SCALE)),
-        15: int(round(title_score_of(rec) * FLOAT_SCALE)),
+        # ROUNDED, NOT TRUNCATED TO int: at FLOAT_SCALE 1 the decimals ARE the
+        # value (an average place of 2.5 is 2.5, and SE's own rating column
+        # runs 6.7..9.1), and it is the scaling that used to carry them.
+        12: round(avg_place * FLOAT_SCALE, 6),
+        13: round(top_rate * FLOAT_SCALE, 6),
+        14: round(rating_of(rec) * FLOAT_SCALE, 6),
+        15: round(title_score_of(rec) * FLOAT_SCALE, 6),
         17: games,
         19: money,
         20: max(0, money_of(rec, "result_x10_week")),
-        21: 0,                              # event winnings: no events exist
+        # v21, the Event ranking's only value column. Zero unless an event is
+        # running and this member has won something inside it.
+        21: max(0, money_of(rec, "result_x10_event")) if rec.get("event") else 0,
         22: games,
         23: int(rec.get("games_week", 0)),
         24: int((week if week is not None else time.time()) // 604800) & 0xFFFF,
@@ -820,7 +921,7 @@ def profile_fields(member_id, name=None, content_id=0, show_flags=None,
         except (TypeError, ValueError):
             continue
         if 0 <= k <= 29:
-            f[41 + k] = 1 if int(v) else 0
+            f[41 + k] = int(v) & 0xFF
     return f
 
 
@@ -941,10 +1042,24 @@ def rank_list(category, limit=RANK_LIST_MAX, names=None, content_ids=None,
         f = profile_fields(
             m, name=(names or {}).get(m), content_id=(content_ids or {}).get(m, 0),
             prev_ranks={category: prev.get(m, NO_RANK)})
+        # A caller that resolved names and got none for this member is looking
+        # at an account that no longer exists: ranked, it was a row with a
+        # blank name. Same rule as tmrank's list. The
+        # CLI passes no names at all and still sees every record.
+        if names is not None and not str(f.get(2) or "").strip():
+            continue
         rows.append((m, f))
     key = RANK_SORT_VALUE[category]
-    rows.sort(key=lambda mf: (-int(mf[1].get(key, 0)), -int(mf[1].get(17, 0)),
-                              mf[0]))
+    # WARNING: FLOAT, NOT int. Categories 0 and 1 sort on the Jan Rating and the
+    # Title score, and at FLOAT_SCALE 1 those are 5.95 / 8.42 / 8.51 -- an
+    # `int()` here collapsed every rated player into two or three buckets and
+    # then ranked them by MEMBER NUMBER inside each. Measured 2026-09-22: six
+    # players came out 8.06, 8.51, 8.27, 8.42, 7.40, 5.95, i.e. not in order.
+    # (It was invisible while the wire carried these x1e6, because then they
+    # really were integers -- see janstats.FLOAT_SCALE.) `float()` is right
+    # under either scaling; the tiebreak stays whole games.
+    rows.sort(key=lambda mf: (-float(mf[1].get(key, 0) or 0),
+                              -int(mf[1].get(17, 0) or 0), mf[0]))
     rows = rows[:limit]
     if remember:
         snap[str(category)] = [m for m, _f in rows]
@@ -1030,6 +1145,37 @@ def selftest():
         # THE MONEY UNIT: JAN = points x RATE (11.7 points -> 11700 at 1000)
         ok &= check(derive(rec)["money"] == max(0, START_MONEY + int(11.7 * RATE)),
                     "money = points x RATE: %r" % derive(rec)["money"])
+        # THE FLOOR (lost, lost, won, and the results screen counted
+        # 0 -> 0 JAN). A loss stops at zero and is not
+        # carried, so the win after it pays out in full.
+        record_game(11, 3, 21000, -29.0)
+        record_game(11, 3, 22400, -27.6)
+        ok &= check(derive(load(11))["money"] == max(0, START_MONEY - int(56.6 * RATE)),
+                    "two losses floor the balance: %r" % derive(load(11))["money"])
+        rec11 = record_game(11, 0, 27500, 37.5)
+        ok &= check(rec11["money_prev"] == max(0, START_MONEY - int(56.6 * RATE))
+                    and rec11["money"] == rec11["money_prev"] + int(37.5 * RATE),
+                    "...and the win pays in full from the floor, before %r after %r"
+                    % (rec11["money_prev"], rec11["money"]))
+        # A record from before the balance existed rebuilds it from the history
+        # with the same floor, not from the lifetime sum (which says 0 here).
+        legacy = load(11)
+        legacy["money"] = legacy["money_prev"] = None
+        ok &= check(money_balance(legacy) == rec11["money"]
+                    and (START_MONEY or max(0, money_of(legacy)) == 0),
+                    "a pre-balance record replays to %r, not the old 0"
+                    % money_balance(legacy))
+        os.remove(stats_file(11))       # the ranking checks below count records
+        # A WIN YESTERDAY IS NOT "TODAY":
+        # the windows are rolled when READ, not only when the next game lands.
+        record_game(11, 0, 32700, 42.7, when=time.time() - 8 * 86400)
+        d11 = derive(load(11))
+        ok &= check(d11["money_today"] == 0 and d11["money_weekly"] == 0
+                    and d11["money_best"] == int(42.7 * RATE),
+                    "a game 8 days old is not today's or this week's: %r"
+                    % ({k: d11[k] for k in ("money_today", "money_weekly",
+                                            "money_best")},))
+        os.remove(stats_file(11))
         ok &= check(jan_for_points(45.5) == int(45.5 * RATE),
                     "jan_for_points scales by RATE")
         ok &= check(0 <= derive(rec)["rank"] <= RANK_MAX,
@@ -1125,9 +1271,10 @@ def selftest():
         ok &= check(f[2] == "PS2Tester" and f[17] == 2 and f[32] == 1
                     and f[25] == 2 and f[26] == rank_index_of(load(9)),
                     "profile fields: name, games, level, yakuman, rank")
-        ok &= check(f[14] == int(round(rating_of(load(9)) * FLOAT_SCALE))
-                    and f[12] == 2500000,
-                    "floats go out x1e6 (avg place 2.5 -> 2500000): %r" % f[12])
+        ok &= check(f[14] == round(rating_of(load(9)) * FLOAT_SCALE, 6)
+                    and f[12] == round(2.5 * FLOAT_SCALE, 6),
+                    "floats go out x FLOAT_SCALE (avg place 2.5 -> %d): %r"
+                    % (int(round(2.5 * FLOAT_SCALE)), f[12]))
         ok &= check(f[41] == 0 and f[45] == 1 and 43 not in f,
                     "show flags land at v41+k; unset stay unset (= shown)")
         ok &= check(f[35] == 2 and f[36] == 0xFF,
@@ -1140,8 +1287,9 @@ def selftest():
                     "content id at +0x10")
         ok &= check(abs(struct.unpack_from("<f", blob, 0x88)[0] - float(f[14]))
                     <= abs(float(f[14])) * 1e-6
-                    and struct.unpack_from("<f", blob, 0x80)[0] == 2500000.0,
-                    "floats at +0x80.. as float32 holding the x1e6 value")
+                    and struct.unpack_from("<f", blob, 0x80)[0]
+                    == float(2.5 * FLOAT_SCALE),
+                    "floats at +0x80.. as float32 holding the scaled value")
         ok &= check(struct.unpack_from("<I", blob, 0x94)[0] == 2
                     and struct.unpack_from("<H", blob, 0xB4)[0] == f[26]
                     and struct.unpack_from("<H", blob, 0xB2)[0] == 2
@@ -1155,8 +1303,10 @@ def selftest():
                     "show flags at +0xc9 + k")
 
         # --- the rank list -----------------------------------------------
+        named = {m: "P%d" % m for m in all_members()}
+        named[9] = "PS2Tester"
         for cat in range(5):
-            rows = rank_list(cat, names={9: "PS2Tester"})
+            rows = rank_list(cat, names=named)
             ok &= check(all(int(rec_.get("games_played", 1)) for _m, rec_ in
                             ((mm, load(mm)) for mm, _f in rows)),
                         "only players with games are ranked (cat %d)" % cat)
@@ -1169,6 +1319,14 @@ def selftest():
         rows2 = rank_list(2)
         ok &= check([m for m, _f in rows2][0] == 77,
                     "cat 2 (money) is sorted on v19")
+        # a member the caller could not name (a deleted account) is not ranked;
+        # with no names at all (the CLI) everyone still is
+        gone = dict(named)
+        gone[77] = None
+        order_named = [m for m, _f in rank_list(0, names=gone, remember=False)]
+        ok &= check(77 not in order_named and 9 in order_named
+                    and len(order_named) == 4,
+                    "an unnamed member is left off the list: %r" % order_named)
         rl = rank_list_blob(0, limit=2)
         ok &= check(len(rl) == 2 * PROFILE_REC, "the blob is N x 232, capped")
         ok &= check(rank_list_path(3) == "U/g/MJS_RANKLIST3"
