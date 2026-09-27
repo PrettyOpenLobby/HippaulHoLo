@@ -68,7 +68,13 @@ def accounts_path():
 
 
 def member_names(members, ttl=60.0):
-    """{member: handle name}, read-only, cached for `ttl` seconds."""
+    """{member: handle name}, read-only, cached for `ttl` seconds.
+
+    None when the accounts database cannot be read: that is NO LOOKUP, not a
+    lookup that found no names. janstats drops a member whose resolved name is
+    empty (an account that no longer exists), so answering `{m: ""}` here
+    emptied every list whenever the database was unreadable; None keeps the
+    rows, named from each record's own stored name."""
     members = [int(m) for m in members]
     now = time.time()
     with _NAMES_LOCK:
@@ -91,7 +97,7 @@ def member_names(members, ttl=60.0):
             _WARNED.add("names")
             print("[boardjan] cannot read names from %s (%s) -- rows show "
                   "without them" % (accounts_path(), e), flush=True)
-        return {m: "" for m in members}
+        return None
     with _NAMES_LOCK:
         _NAMES.update(t=now, map=out)
     return dict(out)
