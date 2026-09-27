@@ -123,7 +123,11 @@ def category(cat, names, limit=janstats.RANK_LIST_MAX, rows=None):
     out = []
     b = board()
     for i, (m, f) in enumerate(rows[:limit]):
-        raw = int(f.get(VALUE_FIELD[cat], 0) or 0)
+        # the ranked value: a float for the two rating columns (see
+        # `row_strings` -- an int() here rounded 8.42 to 8 in the JSON the page
+        # ranks and labels from), whole JAN for the three money ones
+        raw = f.get(VALUE_FIELD[cat], 0) or 0
+        raw = float(raw) if cat in FLOAT_CATEGORIES else int(raw)
         prev = int(f.get(PREV_FIELD[cat], NEW) or 0) & 0xFF
         # the page sets these as REAL text in the ROM web font
         # (tools/jan_boardfont_build.py): the game's own strings, not pixels
@@ -317,6 +321,29 @@ def start(args=None):
     """polboards' start hook: sample the tables from startup, so the delayed
     view has its 30 s of history before anyone opens the page."""
     WATCH.start()
+
+
+#: the bot's status. Jan counts the PEOPLE SEATED at live tables rather than a
+#: marker: jangame publishes none, and the board already samples the tables
+#: for /watch.
+PRESENCE_ONE = "player at the tables"
+PRESENCE_MANY = "players at the tables"
+
+
+def presence_count(args=None):
+    """Distinct human players seated at a table that is still being played.
+    A COM seat has no `mid` (and is flagged `bot`), so it is not a person."""
+    seen = set()
+    try:
+        for tid, st in WATCH.served().items():
+            if st.get("ended"):
+                continue
+            for s in (st.get("seats") or []):
+                if isinstance(s, dict) and not s.get("bot") and s.get("mid") is not None:
+                    seen.add(s["mid"])
+    except Exception:                                  # noqa: BLE001
+        return None                                    # fall back to a marker
+    return len(seen)
 
 
 def snapshot(args=None, now=None):
@@ -702,14 +729,27 @@ def row_strings(b, cat, idx, f):
     else:
         mk = S["down"]
     g = lambda k: int(f.get(k, 0) or 0)                  # noqa: E731
+    # WARNING: THE FLOAT COLUMNS ARE NOT ints, AND THE DIVISOR IS THE KNOB.
+    # This drew `mailfmt(f32(float(g(14))) / 1e6, 7)`: `g()` truncated the
+    # rating to a whole number and the divisor was a literal, both left over
+    # from before `janstats.FLOAT_SCALE` existed -- line 137 of this same file
+    # had already been moved onto the knob, so one file held two scalings.
+    # At FLOAT_SCALE 1 a rating of 8.423333 became `int` 8, then 8/1e6, which
+    # `mailfmt` prints as **0.0000079** -- the `79` is float32 rounding, not a
+    # 7.9, and the string reads exactly like a client dividing by 1e6.
+    # KEY: Two different wrong scalings can print the same string: run the
+    # formatter on the candidates before moving the constant.
+    # `fl()` keeps the decimals and applies the scale actually in force, so the
+    # column is right under EITHER setting of the knob.
+    fl = lambda k: float(f.get(k, 0) or 0) / float(janstats.FLOAT_SCALE or 1)  # noqa: E731
     s = {"ranking": S["rankfmt"] % (mk, idx + 1),
          "ChrName": S["namefmt"] % _enc(f.get(2)),
          "ChrLevel": S["lvfmt"] % g(32)}
     if cat == 0:
-        s["Str4"] = mailfmt(f32(float(g(14))) / 1e6, 7)
+        s["Str4"] = mailfmt(f32(fl(14)), 7)
         s["Str5"] = S["games0fmt"] % g(17)
     elif cat == 1:
-        s["Str4"] = mailfmt(f32(float(g(15))) / 1e6, 4)
+        s["Str4"] = mailfmt(f32(fl(15)), 4)
         t = g(26)
         s["Str5"] = (b["titles"][t].encode("cp932") if 0 <= t < len(b["titles"])
                      else S["bad_title"])
@@ -1895,10 +1935,48 @@ function geometry(m, uv){
   g.computeVertexNormals();
   return g;
 }
-const tileMat = new THREE.MeshStandardMaterial({map: texture("art/w3d-hai.png"), roughness: 0.42, metalness: 0, side: THREE.DoubleSide});
+const baseMap = texture("art/w3d-hai.png");
+const tileMat = new THREE.MeshStandardMaterial({map: baseMap, roughness: 0.42, metalness: 0, side: THREE.DoubleSide});
 const hoverMat = tileMat.clone(); hoverMat.emissive = new THREE.Color(0x3a3322);
 const lastMat = tileMat.clone(); lastMat.emissive = new THREE.Color(0x5a3a10);
 const GEO = new Map();
+// BEGINNER HINTS (the phone app's setting, frame flag S.hints): a small label
+// in each face's top-right corner -- the number on the characters and the
+// 1 of bamboo, E S W N on the winds, Wh G R on the dragons -- drawn into a
+// copy of the face atlas, so the hand, the ponds and the melds all carry it.
+const HINT_LABEL = kind => kind < 9 ? String(kind + 1) : kind === 18 ? "1" : kind >= 27 ? ["E", "S", "W", "N", "Wh", "G", "R"][kind - 27] : null;
+let HINTS = false, hintMap = null;
+function drawHints(img, faces, red){
+  const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+  const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+  const put = (uv, text) => {
+    const us = uv.map(p => p[0] * c.width), vs = uv.map(p => (1 - p[1]) * c.height);
+    const x1 = Math.max(...us), y0 = Math.min(...vs), h = Math.max(...vs) - y0, w = x1 - Math.min(...us);
+    const size = Math.max(8, Math.round(h * 0.24));
+    g.font = "900 " + size + "px Arial, sans-serif"; g.textAlign = "right"; g.textBaseline = "top";
+    g.lineWidth = Math.max(2, size / 4); g.strokeStyle = "#fff"; g.fillStyle = "#1a2a8a";
+    const x = x1 - w * 0.06, y = y0 + h * 0.04;
+    g.strokeText(text, x, y); g.fillText(text, x, y);
+  };
+  faces.forEach((uv, k) => { const t = HINT_LABEL(k); if (t) put(uv, t); });
+  if (red && red[0]) put(red[0], "5");
+  return c;
+}
+window.__janHints = drawHints;          // the app bakes its 2D hand strip the same way
+function setHints(on){
+  HINTS = on;
+  const apply = map => { for (const m of [tileMat, hoverMat, lastMat]){ m.map = map; m.needsUpdate = true; } dirty = true; };
+  if (!on){ apply(baseMap); return; }
+  if (hintMap){ apply(hintMap); return; }
+  const img = new Image();
+  img.onload = () => {
+    hintMap = new THREE.CanvasTexture(drawHints(img, D.faces, D.red));
+    hintMap.colorSpace = THREE.SRGBColorSpace; hintMap.flipY = baseMap.flipY;
+    if (renderer) hintMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    if (HINTS) apply(hintMap);
+  };
+  img.src = "art/w3d-hai.png";
+}
 function tileGeo(c){
   const key = c || "back";
   if (!GEO.has(key)){
@@ -1994,6 +2072,9 @@ const controls = (() => {
 // ---- the pieces for one frame ----
 const pieces = new THREE.Group(); scene.add(pieces);
 let pickable = [], hands = [[], [], [], []], anims = [];
+// the tile backs of hands this viewer may not see (null tiles, the phone app's
+// own table): hidden while the camera is zoomed on that seat
+let backs = [[], [], [], []];
 let pondLast = [null, null, null, null], handMid = [null, null, null, null];
 const V = (x, z, y = 0) => new THREE.Vector3(x, y, z);
 const tilt = [TILT_OPEN, TILT_OPEN, TILT_OPEN, TILT_OPEN], tiltGoal = tilt.slice();
@@ -2044,7 +2125,7 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 function build(state, prev){
   S = state;
-  pieces.clear(); pickable = []; hands = [[], [], [], []]; anims = [];
+  pieces.clear(); pickable = []; hands = [[], [], [], []]; anims = []; backs = [[], [], [], []];
   hovered = null; $("#tip").hidden = true;
   const oldPond = pondLast.slice();
   pondLast = [null, null, null, null]; handMid = [null, null, null, null];
@@ -2058,10 +2139,13 @@ function build(state, prev){
     let hand = (seat.hand || []).slice(), drawn = seat.drawn || null;
     const di = drawn && hand.length % 3 === 2 ? hand.lastIndexOf(drawn) : -1;
     if (di >= 0) hand.splice(di, 1); else drawn = null;
-    hand.sort((a, b) => kindOf(a) - kindOf(b) + (a[0] === "0" ? 0.5 : 0) - (b[0] === "0" ? 0.5 : 0));
+    // a null tile is one this viewer may not see (the phone app's own table
+    // sends the other seats' hands so): it stands as a tile back, after the rest
+    hand.sort((a, b) => (a === null) - (b === null) || (a === null ? 0
+      : kindOf(a) - kindOf(b) + (a[0] === "0" ? 0.5 : 0) - (b[0] === "0" ? 0.5 : 0)));
     const put = (c, i) => makeTile(c, V(ox + d[0] * step * i, oz + d[1] * step * i), p, "stand",
                                    {where: "hand", owner: s, drawn: i >= hand.length});
-    hand.forEach((c, i) => hands[p].push(put(c, i).pivot));
+    hand.forEach((c, i) => { const pv = put(c, i).pivot; hands[p].push(pv); if (c === null){ backs[p].push(pv); pv.visible = FOCUS !== p; } });
     if (drawn){
       const t = put(drawn, hand.length + 0.5);
       hands[p].push(t.pivot);
@@ -2194,6 +2278,9 @@ function comFace(s){
 // PlayOnline's own blank (face 0) for a player who never picked one
 function portrait(pf, seat, s){
   const id = seat.face != null ? seat.face : seat.bot && !seat.left ? ACKY + comFace(s) : 0;
+  // an embedding page (the phone app) may paint faces itself: it has no
+  // face.png route, only the sheets
+  if (window.__janFace) return window.__janFace(pf, id);
   pf.style.backgroundImage = "url(" + faceUrl(id) + ")";
 }
 function drawHud(){
@@ -2289,7 +2376,15 @@ function focusSeat(p, instant){
   if (S) drawHud();
   dirty = true;
 }
-function applyTilts(){ for (let p = 0; p < 4; p++) for (const pv of hands[p]) pv.rotation.x = -tilt[p]; }
+function applyTilts(){
+  for (let p = 0; p < 4; p++){
+    for (const pv of hands[p]) pv.rotation.x = -tilt[p];
+    // a hidden tile stands UPRIGHT, its face towards its owner, so every other
+    // view sees only its back (laid open like a spectator's hand it would show
+    // the atlas's first face, the 1-character); zoomed on its seat it is gone
+    for (const pv of backs[p]){ pv.rotation.x = 0; pv.visible = FOCUS !== p; }
+  }
+}
 const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 const easeOut = t => 1 - Math.pow(1 - t, 3);
 
@@ -2458,6 +2553,7 @@ function sameHand(a, b){
 }
 let lastSig = "", ENDED = false;
 function show(st){
+  if (!!st.hints !== HINTS) setHints(!!st.hints);
   const prev = S && sameHand(S, st) ? S : null;
   if (!prev) $("#results").hidden = true;             // a new hand: the last one's screen goes
   build(st, prev);
@@ -2512,6 +2608,13 @@ function frame(now){
     });
     moving = true;
   }
+  // a call is open on the last discard (S.offer, the phone app's table): it
+  // pulses, as the PS2 blinks the tile you may claim
+  if (S && S.offer){
+    const k = REDUCED ? 1 : 0.5 + 0.5 * Math.sin(now / 150);
+    lastMat.emissive.setRGB(0.25 + 0.75 * k, 0.16 + 0.5 * k, 0.04 + 0.12 * k);
+    lastMat.userData.pulsed = true; moving = true;
+  } else if (lastMat.userData.pulsed){ lastMat.emissive.setHex(0x5a3a10); lastMat.userData.pulsed = false; dirty = true; }
   if (!moving && !dirty) return;
   applyTilts();
   renderer.render(scene, camera);

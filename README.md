@@ -91,11 +91,38 @@ menu draws a shortcut icon per installed title; Square Enix retired this
 one's, so `tools/make_jan_icon.py --www <your portal tree>` composes it from
 the neighbouring icons' own pixels and puts it in place.
 
+## Both client builds
+
+Two builds of the game exist: the 2002 one and the 2004 one (20040727_2,
+the build a US Viewer installs). They send identical openers, so the server
+tells them apart by the build the client claimed on its patch channel
+before launch, which the core's patch server records per address in
+`client-builds.json` (`POL_CLIENT_BUILDS`). The 2004 build is then served
+its own save, table-info, parlour and room-list layouts and its own
+in-game records (`services/janmsgs2004.py`). `POL_JAN_SAVE_2004=1` treats
+every client as the 2004 build, `0` as the 2002 one; the default `auto`
+decides per client.
+
 ## The weekly rankings
 
 The five ranking lists (Jan Rating, Titles, Overall Gamble, Weekly Gamble,
 Event) are built from the players' records on request; there is no batch
 job to run.
+
+The Event list only opens while an event is running. The client cannot
+join one (it has no entry screen), so an event is a window in which what
+players win is counted:
+
+```
+python services/janevent.py --open "Weekend Cup" --days 3
+python services/janevent.py --show
+python services/janevent.py --close
+```
+
+The record lives in the resource directory (`POL_JAN_EVENT` overrides the
+path). `janevent.py --rotate`, run hourly by cron or a timer, opens and
+closes events from the shared event calendar (`eventcal`, when the core
+provides it); `POL_JAN_EVENT_AUTO=0` turns that off.
 
 ## The live board (optional)
 

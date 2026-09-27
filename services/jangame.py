@@ -237,6 +237,9 @@ LOG_MAX = int(os.environ.get("POL_JAN_LOG_MAX", "2000") or 2000)
 #: A table nobody has spoken to for this long is forgotten by the Manager
 #: (finished tables go sooner: after MjGAMEEND and every live seat's MjBYE).
 TABLE_TTL = float(os.environ.get("POL_JAN_TABLE_TTL", "3600") or 3600)
+#: How long a FINISHED table is held while a human who has not said MjBYE still
+#: has records queued for it. `Manager._reap` says why. 0 = the old behaviour.
+FINISHED_GRACE = float(os.environ.get("POL_JAN_FINISHED_GRACE", "120") or 0)
 
 # --- THE GALLERY (spectators, 2026-09-04) ------------------------------------
 #
@@ -695,6 +698,8 @@ class Table(object):
         self._awaiting_recs = []       # [(rec, to)] the current `_awaiting` waits on
         self._resent_for = None        # (awaiting, since) the sweeper re-sent once
         self._byes = set()             # live seats that answered MjGAMEEND with MjBYE
+        self.finished_at = None        # when `_finish` ran (the reaper's grace)
+        self._reap_held_said = False   # one HOLD line per table, not per sweep
         self.pending_chankan = None    # (seat, kind, pre_snapshot) in a chankan window
         self._hold_s = 0.0             # the deal delay, slept by Manager AFTER its lock
         self._managed = False          # True once a Manager owns this table
@@ -907,9 +912,15 @@ class Table(object):
         return None
 
     def _finish(self, why):
-        """The table is done: nothing is awaited and the Manager may forget it."""
+        """The table is done: nothing is awaited and the Manager may forget it.
+
+        `finished_at` is what the reaper's grace window is measured from -- see
+        `Manager._reap`: a table whose last records are still queued for a human
+        who has not said MjBYE must outlive its own game for a few seconds.
+        """
         if self.state != "finished":
             self.log.append(("finished", why))
+            self.finished_at = self.clock()
         self.state = "finished"
         self._awaiting = None
         self._awaiting_since = None
@@ -1417,10 +1428,22 @@ class Table(object):
         for s in range(4):
             seat = {"name": self.nicks[s] or "", "bot": s in self.bots,
                     "left": s in self.dropped,
-                    # the player's member id, for the board to turn into their
-                    # PlayOnline portrait (it never passes it on); none for a COM
-                    "mid": (self.seats[s] if self.seats[s]
-                            and self.seats[s] < 0x0B07000000000000 else None),
+                    # The player's ACCOUNT number, for the board to turn into
+                    # their PlayOnline portrait (it never passes it on); None
+                    # for a COM.
+                    #
+                    # WARNING: NOT `self.seats[s]`, and not a magnitude test on it.
+                    # `seat_player`'s own docstring says `self.seats[]` holds the
+                    # WIRE id -- the client's PolID -- while `self.members` holds
+                    # our account number, and the portrait lives in
+                    # `handle_profile` under the ACCOUNT. The old line also tested
+                    # `< BOT_ID_BASE` to mean "a person", but a real PolID
+                    # (0x5b01...) is ABOVE the bot base (0x0b07...), so it named
+                    # every HUMAN seat None: `jan-tables-live.json` showed
+                    # every seat `"mid": null` while two people were playing.
+                    # The COMs looked fine only because the page draws those
+                    # from its own ACKY pair.
+                    "mid": (None if s in self.bots else self.member_of_seat(s)),
                     "score": (k.scores[s] if k is not None
                               else (g.scores[s] if g is not None else None))}
             h = k.hands[s] if k is not None else None
@@ -2460,17 +2483,21 @@ class Table(object):
 
     def _money(self, seat, result):
         """(JAN before, JAN after) for a LIVE seat from its record -- the
-        record already holds this game, so 'before' backs its result out."""
+        record already holds this game, and `record_game` kept the balance it
+        started from in `money_prev`. The balance is floored at 0 game by game
+        (janstats `money_balance`), so 'before' cannot be backed out of the
+        lifetime sum: after two losses and a win that sum is still negative,
+        and the results screen counted 0 -> 0 JAN for a won game."""
         member = self.member_of_seat(seat)
         if seat not in self.live or not member or janstats is None or not STATS_ENABLE:
             return 0, 0
         try:
             rec = janstats.load(member)
             after = janstats.derive(rec)["money"]
-            before_rec = dict(rec)
-            before_rec["result_x10"] = (int(rec.get("result_x10", 0))
-                                        - int(round(float(result) * 10)))
-            return janstats.derive(before_rec)["money"], after
+            before = rec.get("money_prev")
+            if not isinstance(before, int):
+                before = max(0, after - janstats.jan_for_points(result))
+            return before, after
         except Exception as e:
             self.log.append(("stats-error", "money seat %d: %s" % (seat, e)))
             return 0, 0
@@ -4587,16 +4614,67 @@ class Manager(object):
                 _trace("watch file not written (%s: %s) -- games unaffected"
                        % (type(e).__name__, e))
 
+    @staticmethod
+    def _owed_seats(t):
+        """Seats whose LAST RECORDS ARE STILL IN THE OUTBOX and who are still
+        sitting there waiting for them: a live human who has not said MjBYE.
+
+        A bot has no socket, a seat that has said MjBYE has left the screen, and
+        a spectator's key is not a seat -- none of those are owed anything."""
+        return [s for s, q in t.outbox.items()
+                if q and isinstance(s, int) and s in t.live
+                and s not in t._byes and s not in t.bots]
+
     def _reap(self):
         """Forget finished tables, and idle ones nobody has spoken to for
         TABLE_TTL (finding 32). A playing table always finishes first: the
         sweeper drops its silent seats and `drop_seat` finishes it when the
-        last live seat goes."""
+        last live seat goes.
+
+        WARNING: A FINISHED TABLE IS THE ONLY ROUTE ITS RECORDS HAVE. `pending_for_member`
+        resolves through `by_member`, so popping the table here threw away
+        whatever was still queued for the OTHER human -- silently, with no log
+        and no error. The hand that does this is the ordinary one: the ladder
+        advances on the FIRST ack (`BROADCAST_ACKED`), so player A can ack
+        MjGAMEEND and send MjBYE while player B's copy of it is still in the
+        outbox. B then sits on the results screen for ever, because the record
+        that takes them off it no longer exists anywhere. That is "it hangs
+        when you leave the table after a game is done", and it needs no network
+        fault to happen -- only for one player to be a few seconds behind the
+        other.
+
+        So a finished table is HELD while a live human who has not said MjBYE
+        still has records queued, for at most POL_JAN_FINISHED_GRACE seconds.
+        The cap matters as much as the hold: a player who has walked away must
+        not keep a table alive for ever, and the seat store -- not this object --
+        is what makes the lobby row joinable again, so holding it costs nothing
+        that a player can see.
+        """
         for tid, t in list(self.tables.items()):
             idle = t.clock() - t.last_line_at
             if not (t.state == "finished"
                     or (t.state != "playing" and idle > TABLE_TTL)):
                 continue
+            if t.state == "finished":
+                owed = self._owed_seats(t)
+                if owed:
+                    held = t.clock() - (t.finished_at or t.last_line_at)
+                    if held < FINISHED_GRACE:
+                        if not t._reap_held_said:
+                            t._reap_held_said = True
+                            _trace("HOLD table %d (finished) -- seat(s) %s still "
+                                   "have %d record(s) queued; the reaper waits up "
+                                   "to %gs for them"
+                                   % (tid, ",".join(str(x) for x in owed),
+                                      sum(len(t.outbox[x]) for x in owed),
+                                      FINISHED_GRACE))
+                        continue
+                    _trace("DROPPING %d queued record(s) for seat(s) %s on table "
+                           "%d -- finished %.0fs ago and nobody drained them "
+                           "(POL_JAN_FINISHED_GRACE=%g)"
+                           % (sum(len(t.outbox[x]) for x in owed),
+                              ",".join(str(x) for x in owed), tid, held,
+                              FINISHED_GRACE))
             self._keep_final(t)
             self.tables.pop(tid, None)
             for m, x in list(self.by_member.items()):
@@ -6624,10 +6702,22 @@ def selftest(trace=False):
     m4.tick()
     clk4["t"] += t4_.deadline() + 1
     m4.tick()
-    ok &= check(t4_.state == "finished" and t4_.id not in m4.tables,
-                "...and an unacked MjGAMEEND finishes the table, which the "
-                "Manager then FORGETS (finding 32): state %s, tables %r"
-                % (t4_.state, sorted(m4.tables)))
+    ok &= check(t4_.state == "finished",
+                "...and an unacked MjGAMEEND finishes the table: state %s"
+                % (t4_.state,))
+    # WARNING: FORGETTING IT IS NOW THE SECOND STEP, NOT THE SAME ONE.
+    # Nobody acked anything here, so both seats still have the whole end-of-game
+    # ladder queued -- and dropping the table drops those records, which is the
+    # "stuck on the results screen" hang. It is HELD for POL_JAN_FINISHED_GRACE
+    # and then forgotten, so finding 32's no-growth guarantee still holds.
+    ok &= check(t4_.id in m4.tables and Manager._owed_seats(t4_),
+                "...HELD first, because both seats are still owed records: %r"
+                % (Manager._owed_seats(t4_),))
+    clk4["t"] += FINISHED_GRACE + 1
+    m4.tick()
+    ok &= check(t4_.id not in m4.tables,
+                "...and the Manager FORGETS it past the grace (finding 32): "
+                "tables %r" % (sorted(m4.tables),))
 
     # The sweeper THREAD itself: real clock, tiny deadline, it fires and the
     # hook is told which members have records waiting.
@@ -6756,6 +6846,56 @@ def selftest(trace=False):
                 and 15 not in m7c.by_member and 6 not in m7c.by_member
                 and not m7c.by_lobby,
                 "...after the second it is finished and forgotten everywhere")
+
+    # WARNING: A FINISHED TABLE MUST NOT TAKE THE OTHER PLAYER'S RECORDS WITH IT.
+    # `pending_for_member` resolves through `by_member`, so reaping the table
+    # is the same thing as deleting whatever is still queued for the seat that
+    # has not caught up -- and the ladder advances on the FIRST ack, so being
+    # behind is ordinary, not a fault. The symptom is a client stuck on the
+    # results screen after the game is done.
+    clk7d = {"t": 50000.0}
+    m7d = Manager()
+    m7d.clock = lambda: clk7d["t"]
+    t7d = _two_humans(m7d, 121, 55)
+    t7d.clock = lambda: clk7d["t"]
+    t7d.start_game()
+    t7d.begin_routing()
+    t7d.msg_gameend()
+    t7d.take_routes()
+    t7d.outbox.pop(0, None)                 # seat 0 is up to date
+    t7d.queue_for(1, _stamped(M.MjGAMEEND, 1))   # seat 1's copy, undelivered
+    _dl = t7d.deadline()
+    for _ in range(2):                      # resend once, then proceed-as-acked
+        clk7d["t"] += _dl + 1
+        m7d.tick()
+    ok &= check(t7d.state == "finished",
+                "a game end nobody acks finishes the table (the loss window)")
+    ok &= check(t7d.id in m7d.tables and 6 in m7d.by_member,
+                "...but it is HELD while seat 1 still has records queued")
+    ok &= check(len(m7d.pending_for_member(6)) >= 1,
+                "...and seat 1 can still drain them (this is the hang, fixed)")
+    t7d.queue_for(1, _stamped(M.MjGAMEEND, 1))
+    clk7d["t"] += FINISHED_GRACE + 1
+    m7d.tick()
+    ok &= check(t7d.id not in m7d.tables and 6 not in m7d.by_member,
+                "...and past POL_JAN_FINISHED_GRACE it is forgotten anyway "
+                "(a player who walked away cannot hold a table for ever)")
+    # The hold is for a seat that is WAITING. A bot, a seat that said MjBYE and
+    # a spectator key are not waiting for anything.
+    m7e = Manager()
+    t7e = _two_humans(m7e, 122, 56)
+    t7e.start_game()
+    t7e.queue_for(1, _stamped(M.MjGAMEEND, 1))
+    t7e._byes.add(1)
+    ok &= check(Manager._owed_seats(t7e) == [],
+                "a seat that has already said MjBYE is owed nothing")
+    t7e._byes.discard(1)
+    t7e.bots[1] = Bot(1)
+    ok &= check(Manager._owed_seats(t7e) == [],
+                "...nor is a seat a CPU is playing")
+    t7e.bots.pop(1, None)
+    ok &= check(Manager._owed_seats(t7e) == [1],
+                "...but a live human waiting on a queued record IS")
 
     # --- finding 30: room-qualified lobby tables -------------------------------
     m8 = Manager()

@@ -326,7 +326,8 @@ def discord_checks(tmp, boardjan, polboards):
     rows[0], rows[1] = rows[1], rows[0]
     ev = boardjan.discord_events(s_a, s_b)
     check("a new #1 is news (and only in the category it changed)",
-          len(ev) == 1 and rows[0]["name"] in ev[0] and "Jan Rating" in ev[0], ev)
+          len(ev) == 1 and rows[0]["name"] in ev[0]
+          and boardjan.CATEGORIES[0] in ev[0], ev)
     s_c = json.loads(json.dumps(s_a))
     s_c["categories"][0]["rows"][0]["name"] = ""
     check("...but a name that failed to read is not",
