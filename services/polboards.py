@@ -38,8 +38,14 @@ import uuid
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# the bot's Gateway session (its "Watching N players online"). Imported at
+# module level on purpose: a tool that walks imports to decide what to restart
+# cannot see a lazy import inside a function.
+import polgateway
+
 #: board name -> module. Each gets --<name>-port; 0 leaves it off.
-BOARDS = {"jan": "boardjan", "fmo": "boardfmo", "tm": "boardtm"}
+BOARDS = {"jan": "boardjan", "fmo": "boardfmo", "tm": "boardtm",
+          "ffxi": "boardffxi", "doc": "boarddoc", "fe": "boardfe"}
 if False:                                             # pragma: no cover
     # NEVER RUNS. Boards load BY NAME (importlib), which deploy/pol-stale-check's
     # ast import closure cannot see -- the femap lesson of the same day: a
@@ -47,16 +53,19 @@ if False:                                             # pragma: no cover
     import boardjan  # noqa: F401
     import boardfmo  # noqa: F401
     import boardtm  # noqa: F401
+    import boardffxi  # noqa: F401
+    import boarddoc  # noqa: F401
+    import boardfe  # noqa: F401
 
 #: board name -> its Discord messages beyond the main one. Each feed is a
 #: separate webhook (Tetra Master was given one channel for the
 #: rankings and one for the auction, 2026-09-12), a separate message edited in
 #: place, and a separate message-id file.
-FEEDS = {"tm": ("auction", "live"), "jan": ("live",)}
+FEEDS = {"tm": ("auction", "live"), "jan": ("live",), "ffxi": ("conquest", "auction")}
 #: feeds that post into their board's own channel when they have no webhook of
 #: their own: the Jan "live" feed (a post per watchable table, 2026-09-13)
 #: belongs next to the Jan board.
-FEED_SHARES_MAIN = frozenset({"jan_live", "tm_live"})
+FEED_SHARES_MAIN = frozenset({"jan_live", "tm_live", "ffxi_conquest", "ffxi_auction"})
 
 
 def feed_keys(name):
@@ -78,7 +87,9 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a):
         pass
 
-    def _send(self, code, body, ctype, cache="no-store"):
+    def _send(self, code, body, ctype, cache="no-store", headers=None):
+        """`headers`: a board route's optional 5th element, extra response
+        headers (boardtm's face lookups add Access-Control-Allow-Origin)."""
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(code)
@@ -87,6 +98,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -104,7 +117,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path.startswith("/pol/"):
             return self._forward_bridge(path[len("/pol"):])
         fn = getattr(board, "discord_interaction", None)
-        if path != "/discord/interactions" or fn is None:
+        # NOT gated on discord_interaction. That is the handler for the board's
+        # own BUTTONS, and a board can have none (City Control, Dirge and FFXI
+        # post a link button, which Discord never calls back for) and still
+        # need this endpoint: /<board>board arrives here too, and without it
+        # the bot could never be told which channel to post in.
+        if path != "/discord/interactions":
             return self._send(404, "not found", "text/plain")
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -131,6 +149,10 @@ class _Handler(BaseHTTPRequestHandler):
             resp = {"type": 1}
         elif data.get("type") == 2 and (data.get("data") or {}).get("name") == "%sboard" % board.NAME:
             resp = handle_command(board, board.NAME, data)
+        elif fn is None:
+            # a board with no buttons of its own was clicked anyway
+            resp = {"type": 4, "data": {"flags": 64, "allowed_mentions": {"parse": []},
+                                        "content": "This board has no buttons."}}
         else:
             try:
                 resp = fn(data, args)
@@ -749,29 +771,61 @@ def webhook_channel(hook, opener=None):
     return str(data.get("channel_id") or "") or None
 
 
+def channel_guild(cid, token, opener=None):
+    """Which server a channel is in. The webhook's channel has to be filed
+    under its own guild like any other, or it and that server's own
+    /<board>board choice would each run a worker and post twice."""
+    d = Discord("lookup", "%s/channels/%s" % (DISCORD_API, cid), os.devnull,
+                opener=opener, auth=token)
+    st, data = d._call("GET", d.url)
+    if st != 200 or not isinstance(data, dict):
+        return None
+    return str(data.get("guild_id") or "") or None
+
+
 def _state_dir():
     return os.environ.get("POL_BOARDS_STATE_DIR") or ("/state" if os.path.isdir("/state") else "")
 
 
 def bot_channels():
-    """{"chosen": {feed key: channel id}, "posted": {feed key: channel id}}:
-    where a feed was told to post (/<board>board <feed>), and where
-    it last did. Kept in the state dir, the service's one writable place."""
+    """{"chosen": {feed key: {guild id: channel id}},
+        "posted": {feed key: {guild id: channel id}}}: where a feed was told
+    to post (/<board>board <feed>), and where it last did, per server. Kept
+    in the state dir, the service's one writable place.
+
+    Per guild so that a bot invited to a second server adds a board there
+    instead of moving the first server's board. Every feed runs a post per
+    guild.
+
+    The older flat file ({feed: channel}) still reads: its channel is filed
+    under "", the guild that cannot be named from the file alone. That keeps
+    a running board where it is across the upgrade, and the first
+    /<board>board adopts it (see _note_channel).
+    """
     d = _state_dir()
     try:
         with open(os.path.join(d, "discord_channels.json"), encoding="utf-8") as fh:
             data = json.load(fh) or {}
     except (OSError, ValueError, TypeError):
         data = {}
-    return {"chosen": dict(data.get("chosen") or {}), "posted": dict(data.get("posted") or {})}
+    out = {}
+    for which in ("chosen", "posted"):
+        per = {}
+        for key, val in (data.get(which) or {}).items():
+            if isinstance(val, dict):
+                got = {str(g): str(c) for g, c in val.items() if c}
+                if got:
+                    per[key] = got
+            elif val:
+                per[key] = {"": str(val)}           # the pre-guild file
+        out[which] = per
+    return out
 
 
-def _note_channel(which, key, cid):
+def _write_channels(data):
     d = _state_dir()
     if not d:
         return False
-    data = bot_channels()
-    data[which][key] = str(cid)
     try:
         os.makedirs(d, exist_ok=True)
         path = os.path.join(d, "discord_channels.json")
@@ -782,6 +836,29 @@ def _note_channel(which, key, cid):
         return True
     except OSError:
         return False
+
+
+def _note_channel(which, key, cid, guild=""):
+    data = bot_channels()
+    per = data[which].setdefault(key, {})
+    per[str(guild or "")] = str(cid)
+    if guild:
+        # a named guild supersedes the unnamed one the pre-guild file left:
+        # this IS that board, now that a command has told us whose it is
+        per.pop("", None)
+    return _write_channels(data)
+
+
+def _forget_channel(which, key, guild=""):
+    data = bot_channels()
+    per = data[which].get(key) or {}
+    if per.pop(str(guild or ""), None) is None:
+        return False
+    if per:
+        data[which][key] = per
+    else:
+        data[which].pop(key, None)
+    return _write_channels(data)
 
 
 def feed_names(board, name):
@@ -829,6 +906,9 @@ def handle_command(board, name, data):
     names = feed_names(board, name)
     title = getattr(board, "DISCORD_TITLE", name)
     cid = str(data.get("channel_id") or (data.get("channel") or {}).get("id") or "")
+    # which server this was typed in: a feed's channel is remembered per guild,
+    # so a second server ADDS a board rather than moving the first one's
+    guild = str(data.get("guild_id") or (data.get("guild") or {}).get("id") or "")
     try:
         perms = int(((data.get("member") or {}).get("permissions")) or 0)
     except (TypeError, ValueError):
@@ -837,22 +917,68 @@ def handle_command(board, name, data):
     def reply(text):
         return {"type": 4, "data": {"flags": 64, "content": text,
                                     "allowed_mentions": {"parse": []}}}
+
+    def where(key, ch):
+        """Where this feed posts IN THIS SERVER. The pre-guild entry ("") is
+        this server's too until a command files it properly."""
+        for g in (guild, ""):
+            if (ch["chosen"].get(key) or {}).get(g):
+                return "<#%s>" % ch["chosen"][key][g]
+        for g in (guild, ""):
+            if (ch["posted"].get(key) or {}).get(g):
+                return "<#%s> (its webhook's channel)" % ch["posted"][key][g]
+        return "nowhere here yet: run this command in the channel you want"
+
     if sub == "status":
         ch = bot_channels()
-        lines = ["**%s %s**: %s" % (title, opt, ("<#%s>" % ch["chosen"][key]) if key in ch["chosen"]
-                                     else ("<#%s> (its webhook's channel)" % ch["posted"][key])
-                                     if key in ch["posted"] else "its webhook's channel")
-                 for opt, key in names.items()]
-        return reply("\n".join(lines))
+        return reply("\n".join("**%s %s**: %s" % (title, opt, where(key, ch))
+                               for opt, key in names.items()))
     if sub not in names:
         return reply("There is no %r feed on this board." % sub)
     if not perms & _MOVERS:
         return reply("Only members who can manage the server can move the board.")
-    if not cid or not _note_channel("chosen", names[sub], cid):
+    if not cid or not _note_channel("chosen", names[sub], cid, guild):
         return reply("The board could not save that just now; try again in a moment.")
     return reply("Done: the %s %s will post in <#%s> within a few seconds, and its old "
                  "post goes away. The bot needs to be able to see and post in this "
                  "channel." % (title, sub, cid))
+
+
+def start_presence(board, args, name, token):
+    """Hold the bot's Gateway session so its status reads "Watching 12 players
+    online". Presence is the one Discord thing with no REST endpoint, so this
+    is the only place the service keeps a socket open -- see polgateway.
+
+    Where the number comes from, in order:
+      * the board's own `presence_count(args)`, for a board that already knows
+        (Jan counts the people seated at its live tables). This route needs
+        no change to a game server.
+      * else the marker `PRESENCE_GAME` (default: the board's name) publishes,
+        which live_sessions.py has been writing all along.
+
+    A board says what its count is CALLED in PRESENCE_ONE/PRESENCE_MANY: Tetra
+    Master's marker counts matches, not players. With no number at all the
+    status is simply blank, so a board for a game that does not report costs
+    nothing.
+    """
+    off = ("off", "0", "no", "false")
+    if (os.environ.get("POL_BOARDS_PRESENCE", "on") or "").strip().lower() in off:
+        return None
+    game = getattr(board, "PRESENCE_GAME", name)
+    idle = getattr(board, "PRESENCE_IDLE", "")
+    one = getattr(board, "PRESENCE_ONE", "player online")
+    many = getattr(board, "PRESENCE_MANY", "players online")
+    own = getattr(board, "presence_count", None)
+
+    def text():
+        n = None
+        if own is not None:
+            n = own(args)
+        if n is None:
+            n = polgateway.read_count(game)
+        return polgateway.count_text(game, idle=idle, n=n, one=one, many=many)
+
+    return polgateway.Presence(name, token, status_fn=text).start()
 
 
 def run_bot_feed(board, args, key, feed, hook, token, opener=None, rounds=None,
@@ -864,56 +990,124 @@ def run_bot_feed(board, args, key, feed, hook, token, opener=None, rounds=None,
     the service was down -- the feed's posts in the old channel are deleted
     before it posts in the new one. A board with discord_<feed>_bot_message
     posts that ONE message; otherwise the feed's message set, with bot=True
-    so it adds its buttons. `rounds` bounds each channel's loop for tests."""
-    gone = DiscordSet(key, hook, state_path(args, key), opener=opener).clear()
-    if gone:
-        print("[polboards] %s: deleted %d message(s) the webhook had posted -- the "
-              "bot posts now" % (key, gone), flush=True)
+    so it adds its buttons. `rounds` bounds each channel's loop for tests.
+
+    ONE POST PER SERVER. This is a supervisor: it works out which (guild,
+    channel) pairs the feed owes a post to and runs a worker for each, so a
+    bot invited to three servers keeps three boards rather than three servers
+    fighting over one. A guild that stops being a target has its post deleted.
+
+    THE WEBHOOK IS OPTIONAL. A board with a webhook keeps posting in its
+    channel by default, as before. A board with none simply waits for
+    /<board>board <feed> in each server that wants it, which is what makes a
+    bot invitable without handing anyone a webhook URL first.
+    """
+    if hook:
+        gone = DiscordSet(key, hook, state_path(args, key), opener=opener).clear()
+        if gone:
+            print("[polboards] %s: deleted %d message(s) the webhook had posted -- the "
+                  "bot posts now" % (key, gone), flush=True)
     single = feed_fn(board, feed, "bot_message")
-    path = state_path(args, key + "_bot")
     # a feed's own ended-message life (the live feeds: 0, gone with the game),
     # as the webhook path already honours it
     ended = feed_fn(board, feed, "ended_ttl")
     ended = args.discord_ended_ttl if ended is None else ended
+    #: the webhook's channel and the guild it is in, looked up at most once
+    home = {"cid": None, "guild": None, "tried": False}
 
-    def make(cid):
+    def make(cid, guild):
+        # one state file per (feed, guild): a message id belongs to the server
+        # it was posted in, and sharing one file across servers loses posts
+        path = state_path(args, "%s_bot%s" % (key, ("_" + guild) if guild else ""))
         url = "%s/channels/%s" % (DISCORD_API, cid)
         if single is not None:
             return Discord(key, url, path, args.discord_every, args.discord_event_ttl,
                            args.discord_refresh, opener=opener, auth=token)
         return DiscordSet(key, url, path, args.discord_slot_every, args.discord_event_ttl,
                           args.discord_refresh, ended, opener=opener, auth=token)
-    home, tries, d = None, 0, None
-    while True:
-        cid = bot_channels()["chosen"].get(key)
-        if not cid:
-            home = home or webhook_channel(hook, opener)
-            cid = home
-        if not cid:
-            tries += 1
-            if tries == 1:
-                print("[polboards] %s: cannot read the webhook's channel yet -- "
-                      "retrying each minute" % key, flush=True)
-            if rounds is not None:
-                return None
-            time.sleep(60)
-            continue
-        was = bot_channels()["posted"].get(key)
+
+    def targets():
+        """{guild: channel} this feed owes a post to right now."""
+        chosen = bot_channels()["chosen"].get(key) or {}
+        if chosen:
+            # ONCE A CHANNEL HAS BEEN CHOSEN, THE WEBHOOK IS DONE. Keeping the
+            # webhook's channel as a standing extra target would bring back
+            # what /<board>board exists to escape: a webhook channel that
+            # answers 403 Missing Permissions would be posted to, and refuse,
+            # forever.
+            return dict(chosen)
+        want = {}
+        if hook and not home["tried"]:
+            home["tried"] = True
+            home["cid"] = webhook_channel(hook, opener)
+            if home["cid"]:
+                home["guild"] = channel_guild(home["cid"], token, opener) or ""
+            else:
+                print("[polboards] %s: cannot read the webhook's channel yet" % key,
+                      flush=True)
+                home["tried"] = False       # ask again on the next pass
+        if home["cid"]:
+            want[home["guild"] or ""] = home["cid"]
+        want.update(chosen)                 # a server's own choice wins for it
+        return want
+
+    def sweep(want):
+        """Delete what we posted in a server that is no longer a target (the
+        bot was thrown out, or the feed was moved away)."""
+        for g, cid in list((bot_channels()["posted"].get(key) or {}).items()):
+            if g in want:
+                continue                    # its own worker handles a move
+            n = make(cid, g).clear()
+            _forget_channel("posted", key, g)
+            print("[polboards] %s: no longer posts in server %s (%d post(s) deleted)"
+                  % (key, g or "?", n), flush=True)
+
+    def run_one(guild, cid, stop_evt=None):
+        was = (bot_channels()["posted"].get(key) or {}).get(guild)
         if was and was != cid:
-            n = make(was).clear()
+            n = make(was, guild).clear()
             print("[polboards] %s: moved from channel %s to %s (%d old post(s) deleted)"
                   % (key, was, cid, n), flush=True)
-        _note_channel("posted", key, cid)
-        d = make(cid)
-        here = cid
-        stop = lambda: (bot_channels()["chosen"].get(key) or home) != here   # noqa: E731
+        _note_channel("posted", key, cid, guild)
+        d = make(cid, guild)
+        stop = lambda: ((stop_evt is not None and stop_evt.is_set())      # noqa: E731
+                        or targets().get(guild) != cid)
         if single is not None:
             watch(board, args, d, period=period, rounds=rounds, feed=feed,
                   message_fn=single, stop=stop)
         else:
             watch_set(board, args, d, period=period, rounds=rounds, feed=feed, stop=stop)
-        if rounds is not None:
-            return d
+        return d
+
+    if rounds is not None:                  # tests: one pass, synchronous
+        want = targets()
+        sweep(want)
+        d = None
+        for guild, cid in want.items():
+            d = run_one(guild, cid)
+        return d
+
+    workers, quiet = {}, False
+    while True:
+        want = targets()
+        sweep(want)
+        for guild in [g for g, w in workers.items() if want.get(g) != w["cid"]]:
+            workers.pop(guild)["stop"].set()
+        for guild, cid in want.items():
+            if guild in workers and workers[guild]["thread"].is_alive():
+                continue
+            ev = threading.Event()
+            t = threading.Thread(target=run_one, args=(guild, cid, ev), daemon=True,
+                                 name="discord-bot-%s-%s" % (key, guild or "home"))
+            workers[guild] = {"cid": cid, "stop": ev, "thread": t}
+            t.start()
+        if not want and not quiet:
+            quiet = True
+            print("[polboards] %s: nowhere to post yet -- run /%sboard in a channel"
+                  % (key, board.NAME if hasattr(board, "NAME") else key), flush=True)
+        elif want:
+            quiet = False
+        time.sleep(30)
 
 
 def state_path(args, name):
@@ -1094,30 +1288,40 @@ def main(argv=None):
         started.append("%s on http://%s:%d/" % (name, args.bind, port))
         if hasattr(board, "start"):
             board.start(args)               # a board's own background work (Jan: watching)
+        token = (getattr(args, "%s_discord_bot_token" % name, "") or "").strip()
+        app_id = (getattr(args, "%s_discord_app_id" % name, "") or "").strip()
+        if token and app_id:
+            threading.Thread(target=register_commands, args=(board, name, token, app_id),
+                             name="discord-commands-" + name, daemon=True).start()
+        if token:
+            start_presence(board, args, name, token)
         for feed, key in feed_keys(name):
             hook = (getattr(args, "%s_discord_webhook" % key, "") or "").strip()
             if not hook and key in FEED_SHARES_MAIN:
                 hook = (getattr(args, "%s_discord_webhook" % name, "") or "").strip()
-            if not hook:
+            # A BOT NEEDS NO WEBHOOK. It is invited to a server and told where
+            # to post with /<board>board, which is the whole point of having a
+            # bot: nobody has to be handed a webhook URL to add a board.
+            if not hook and not token:
                 continue
-            if not hook.startswith("https://") or "/api/webhooks/" not in hook:
+            if hook and (not hook.startswith("https://") or "/api/webhooks/" not in hook):
                 print("[polboards] %s: the Discord webhook does not look like a "
                       "Discord webhook URL -- posting is OFF" % key, flush=True)
                 continue
             many = feed_fn(board, feed, "messages") is not None
-            if not many and feed_fn(board, feed, "message") is None:
-                print("[polboards] %s: this board has no Discord message -- posting "
-                      "is OFF" % key, flush=True)
+            # the bot path draws its own message (it adds buttons); the webhook
+            # path draws the plain one. A board missing the one its mode needs
+            # says so rather than starting a feed that can never post.
+            wants = "bot_message" if token else "message"
+            if not many and feed_fn(board, feed, wants) is None:
+                print("[polboards] %s: this board has no discord_%s%s -- posting is OFF"
+                      % (key, ("%s_" % feed) if feed else "", wants), flush=True)
                 continue
-            token = (getattr(args, "%s_discord_bot_token" % name, "") or "").strip()
-            app_id = (getattr(args, "%s_discord_app_id" % name, "") or "").strip()
-            if token and app_id and not feed:
-                threading.Thread(target=register_commands, args=(board, name, token, app_id),
-                                 name="discord-commands-" + name, daemon=True).start()
             if token:
-                print("[polboards] %s: posting AS THE BOT (app %s) into its webhook's "
-                      "channel" % (key, getattr(args, "%s_discord_app_id" % name, "") or "?"),
-                      flush=True)
+                print("[polboards] %s: posting AS THE BOT (app %s)%s"
+                      % (key, app_id or "?",
+                         " into its webhook's channel" if hook
+                         else " -- run /%sboard to say where" % name), flush=True)
                 threading.Thread(target=run_bot_feed,
                                  args=(board, args, key, feed, hook, token),
                                  name="discord-bot-" + key, daemon=True).start()
