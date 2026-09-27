@@ -109,6 +109,44 @@ REJOIN = 0x3CB
 MY_TABLE = 0x18
 
 
+#: WHERE "Back to Room" LOOKS. Added 2026-09-21; the 2004 build validates the
+#: destination before it dials, and the 2002 build has no such branch, which is
+#: why these two fields were never load-bearing before.
+#:
+#: `ReturnRoom.cc`'s state machine (2004 0x00330CC0) polls `b/g/ZL`, then at
+#: state 3 (0x00330DE8) reads the ZONE from the save and scans the list:
+#:
+#:     00330dec  lbu  a2, [0x004C46DD]   ; = save +0x40D in 2004 = +0x3C5 here
+#:     00330dfc  jal  0x003b8c60         ; find zone by id
+#:     003b8c9c    lb v0, 60(rec)        ; the parsed ZL record's +0x3C id
+#:     003b8ca0    bnel a2, v0, next     ; signed byte compare
+#:     00330e2c  addiu a2, zero, -13172  ; no match -> "destination zone was
+#:                                       ;   not found"
+#:
+#: and one state later (0x0033117C) reads the ROOM the same way from save
+#: +0x010 against the `b/g/RL%03d` record's +0x00, raising -13181 on a miss.
+#: Served zero, both lookups miss, so the menu item could only ever fail.
+RETURN_ZONE = 0x3C5             # u8  -- matches `b/g/ZL` +0x3C  (janlobby.ZL_F_ID)
+RETURN_ROOM = 0x010             # u64 -- matches `b/g/RL%03d` +0x00 (RL_F_ROOMID)
+
+
+def apply_return_room(blob, zone_id=None, room_id=None):
+    """The save with "Back to Room"'s destination stamped in, 2002 offsets.
+
+    `to_2004` moves +0x3C5 to +0x40D and leaves +0x010 where it is, so this is
+    written in 2002 coordinates like everything else here and converted after.
+    A None leaves that field alone.
+    """
+    buf = bytearray(blob)
+    if len(buf) <= RETURN_ZONE:
+        return bytes(buf)
+    if zone_id is not None:
+        buf[RETURN_ZONE] = int(zone_id) & 0x7F
+    if room_id is not None:
+        struct.pack_into("<Q", buf, RETURN_ROOM, int(room_id) & 0xFFFFFFFFFFFFFFFF)
+    return bytes(buf)
+
+
 def apply_seat(blob, seat=None, master_seat=None, table_id=None, rejoin=None):
     """Stamp this member's reservation into the save.
 
@@ -278,6 +316,75 @@ try:
                                                           0x180) else 1))}
 except ImportError:                                         # pragma: no cover
     pass
+
+
+# === THE 2004 BUILD (20040727_2) ==============================================
+#
+# The build on the Dirge of Cerberus and Front Mission Online discs, and the
+# only one a US Viewer can install, reads a LONGER save with a DIFFERENT magic.
+# Measured 2026-09-21 in the plaintext module built from the Dirge disc (module
+# base 0x280000, save buffer 0x004c42d0):
+#
+#   0x0029c398  read("U/g/MJSUserData", 0x004c42d0, 0x418)      1048, not 976
+#   0x0029c434  lui v0,0x0206 / ori v0,v0,0x0300 / beq v1,v0    magic 0x02060300
+#   0x0029c448  addiu v0,zero,-650                              else JHR-650
+#
+# Its apply_from_save (0x0029c44c..) reads the SAME fields as the 2002 one
+# (`lmenu__002b2ab0`), and every one that sits past +0x2B6 has moved by exactly
+# +0x48:
+#
+#     2002   +0x2b6 +0x2b8 +0x2ba +0x2cb +0x2eb +0x3c5 +0x3c8 +0x3c9 +0x3ca +0x3cb
+#     2004   +0x2fe +0x300 +0x302 +0x313 +0x333 +0x40d +0x410 +0x411 +0x412 +0x413
+#
+# while +0x000/+0x010/+0x018 and every stat read up to +0x23C (the yaku
+# counters, +0x22C/+0x230, LEVEL +0x238, RANK +0x23C) are where they were. So 72
+# bytes went in somewhere in [+0x240, +0x2B6), a span NO 2002 code reads and
+# that every save this server authors leaves zero -- which is why the exact
+# insertion point cannot matter to us. The 2004 build reads ten new u32s at
+# +0x2B4..+0x2F0 out of that block; their MEANING IS NOT MEASURED and they are
+# served as zero.
+#
+# NOT MEASURED: whether the 2004 record screen still takes money from
+# +0x028/+0x030/+0x040/+0x048 -- the lui-relative scan of the 2004 text finds
+# +0x040 and a new +0x0C8 but not the other three, so that screen may read
+# through a pointer now. A wrong number there is cosmetic; the magic is not.
+MAGIC_2004 = 0x02060300
+SIZE_2004 = 0x418                                                   # 1048
+INSERT_AT_2004 = 0x240
+INSERT_LEN_2004 = SIZE_2004 - SIZE                                  # 72
+
+
+def to_2004(blob):
+    """A 2002-layout save (976, or 980 with the trailer slot) as the 2004
+    build reads it: 1048 bytes, plus the trailer slot when one came in.
+
+    A slice and a pad, not a second encoder -- same reasoning as
+    `tmrank.to_ps2`. Everything this module writes is written in 2002
+    coordinates first and moved here, so `apply_live` / `apply_seat` need no
+    second offset table.
+    """
+    if len(blob) not in (SIZE, SIZE + TRAILER):
+        raise ValueError("expected %d or %d bytes, got %d"
+                         % (SIZE, SIZE + TRAILER, len(blob)))
+    body, tail = blob[:SIZE], blob[SIZE:]
+    if any(body[INSERT_AT_2004:0x2B4]):
+        raise ValueError("bytes in +0x240..+0x2B4 are not zero; the insertion "
+                         "point is not known well enough to move them")
+    out = bytearray(body[:INSERT_AT_2004] + bytes(INSERT_LEN_2004)
+                    + body[INSERT_AT_2004:])
+    struct.pack_into("<I", out, MAGIC_OFF, MAGIC_2004)
+    assert len(out) == SIZE_2004
+    return bytes(out) + tail
+
+
+def is_2004_version(version):
+    """True for a patch-channel version string of the 2004-layout build.
+
+    `20040727_2` is the only such build known. Versions from 2026 on are this
+    server's own overlays, which are published on the 2002 tree.
+    """
+    v = (version or "")[:8]
+    return v.isdigit() and "20040727" <= v < "20260000"
 
 
 def measured_fields():
@@ -628,6 +735,26 @@ def selftest():
     return 0 if ok else 1
 
 
+def selftest_2004():
+    base = build(existing=True)[0]
+    b4 = to_2004(base)
+    assert len(b4) == len(base) + INSERT_LEN_2004
+    assert struct.unpack_from("<I", b4, 0)[0] == MAGIC_2004
+    moved = ((0x2b6, 0x2fe), (0x2b8, 0x300), (0x2ba, 0x302), (0x2cb, 0x313),
+             (0x2eb, 0x333), (0x3c5, 0x40d), (0x3c8, 0x410), (0x3c9, 0x411),
+             (0x3ca, 0x412), (0x3cb, 0x413))
+    probe = bytearray(base)
+    for i, (old, _new) in enumerate(moved):
+        probe[old] = 0x80 + i
+    p4 = to_2004(bytes(probe))
+    for i, (_old, new) in enumerate(moved):
+        assert p4[new] == 0x80 + i, hex(new)
+    assert p4[4:INSERT_AT_2004] == bytes(probe)[4:INSERT_AT_2004]
+    assert is_2004_version("20040727_2") and not is_2004_version("20020314_0")
+    assert not is_2004_version("20030909_0") and not is_2004_version("20260909_0")
+    print("  ok   2004 layout: magic, length and the ten moved fields")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--selftest", action="store_true")
@@ -643,6 +770,7 @@ def main():
     a = ap.parse_args()
 
     if a.selftest or not (a.fields or a.dump or a.member or a.out or a.base):
+        selftest_2004()
         return selftest()
     if a.fields:
         print(json.dumps(FIELDS, indent=2, sort_keys=True))

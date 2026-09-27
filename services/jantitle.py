@@ -18,8 +18,10 @@ bound by name through `titles.core` (`_CORE_NAMES` below): the moved code
 keeps the names it always had, and running this module outside the core (the
 selftests) binds the standalone defaults instead.
 """
+import json
 import os
 import struct
+import threading
 
 import titles
 from titles import core as _core
@@ -39,8 +41,12 @@ _CORE_NAMES = (
     "log", "NoPad", "PRESENCE", "ROOMS", "accounts", "polpro", "RESOURCE_DIR",
     "_game_notice_line", "_session_get", "_session_sid", "_member_content_id",
     "_member_display_name", "_live_rooms", "_title_zone", "_title_zone_lease",
-    "_content_profiles",
+    "_content_profiles", "_peer_build", "CLIENT_BUILDS_PATH",
 )
+
+#: Used when the core binds no `_peer_build` (an older core, or the selftests):
+#: a per-thread marker nobody sets, so every client reads as the 2002 build.
+_OWN_PEER_BUILD = threading.local()
 
 
 def _rebind():
@@ -49,6 +55,12 @@ def _rebind():
             globals()[name] = getattr(_core, name)
         except AttributeError:
             globals()[name] = None
+    if globals().get("_peer_build") is None:
+        globals()["_peer_build"] = _OWN_PEER_BUILD
+    if not globals().get("CLIENT_BUILDS_PATH"):
+        globals()["CLIENT_BUILDS_PATH"] = os.environ.get(
+            "POL_CLIENT_BUILDS",
+            os.path.join(os.environ.get("POL_LOG_DIR", "/logs"), "client-builds.json"))
 
 
 _rebind()
@@ -227,6 +239,24 @@ def _jan_rank_reply(payload):
                             f"0..4 -- answering <RG>")
             return polpro.build([("RG", ["-8706"])]), True
         rows = len(janstats.rank_list(cat, remember=False))
+        # AN EMPTY RANKING IS NOT AN EMPTY LIST, it is error -740. The 2004
+        # build tests for exactly that code and answers it with its own
+        # dialog, "Nobody is registered in this ranking yet." plus an OK
+        # button (2004 module 0x00327404 tests -740 and branches to 0x00327418,
+        # which raises the string at 0x0049eed0 and returns to state 11;
+        # -8809 and anything else land on the POL error -13053 arms at
+        # 0x00327450 / 0x0032748c). Served `<LN>`(0) instead, the screen goes
+        # on to read a zero-row file and draws nothing, which reads as a hang.
+        # The 2002 build has neither the code nor the string, so it keeps the
+        # empty list `<LN>`(0) is documented for. POL_JAN_RANK_EMPTY=0 restores
+        # the old answer for both.
+        if (rows == 0 and os.environ.get("POL_JAN_RANK_EMPTY", "1") == "1"
+                and _jan_peer_is_2004()):
+            log("authserv", f"  jan rankings: <RR>({cat}) = "
+                            f"{janstats.RANK_CATEGORIES[cat]} is empty -> "
+                            f"<RG>(-740), the 2004 build's 'nobody is "
+                            f"registered in this ranking yet'")
+            return polpro.build([("RG", ["-740"])]), True
         path = janstats.rank_list_path(cat)
         log("authserv", f"  jan rankings: <RR>({cat}) = "
                         f"{janstats.RANK_CATEGORIES[cat]} -> <RF>({path}) "
@@ -285,18 +315,37 @@ def _jan_member_for_cid(cid):
 
 
 def _jan_show_flags(cid):
-    """`{k: 0/1}` from the stored `<GR>` write: `<NO>(k, v)` sets show flag k
-    (= reply value v41+k); `<PP>`/`<PO>` ride along as v3/v7. Unset = shown."""
+    """`{k: byte}` from the stored `<GR>` write: `<NO>(k, v)` sets reply value
+    v41+k TO v, VERBATIM.
+
+    WARNING: v IS NOT A BOOLEAN, and reading it as one threw away every per-field
+    choice the player made. Live `<GR>` writes from one client carry
+    `<NO>(22,3) <NO>(16,3) ...` and, after the player changed the settings,
+    `<NO>(22,1) <NO>(16,1) ...`: the values toggled between are 3 and 1 and
+    NEVER 0, so `1 if v == 0 else 0` mapped BOTH to 0 and the next `<PO>` read
+    back the same all-zero tail whatever was picked. That is why only the goal
+    field appeared to save. PROFILE_PO's own note is the rule -- `<NO>(i,v)`
+    addresses the byte array the reply carries at value[41+i] -- and a byte
+    array written by index is read back by index, so what 1 and 3 MEAN does
+    not have to be known to carry them.
+
+    The other three groups a SET sends, per the same table: `<PP>` is v3
+    (struct +0x1C, the goal field), `<FO>` is v8 (+0x2A) and `<VO>` is v40
+    (+0xC8). The group the old code looked for, `PO`, is the REPLY code: a
+    client never sends it in a `<GR>`, so that arm never fired and `<FO>` was
+    dropped."""
     out, extra = {}, {}
     rec = (_content_profiles() or {}).get(str(cid)) or {}
     for g, vals in rec.get("groups") or []:
         try:
             if g == "NO" and len(vals) >= 2:
-                out[int(vals[0])] = 1 if int(vals[1]) == 0 else 0
+                out[int(vals[0])] = int(vals[1]) & 0xFF
             elif g == "PP" and vals:
                 extra[3] = int(vals[0])
-            elif g == "PO" and vals:
-                extra[7] = int(vals[0])
+            elif g == "FO" and vals:
+                extra[8] = int(vals[0])
+            elif g == "VO" and vals:
+                extra[40] = int(vals[0])
         except (TypeError, ValueError):
             continue
     return out, extra
@@ -351,6 +400,9 @@ _JAN_CONTENT_ID = 3
 #: nothing queued for them anyway. The ChatSession (5th, may be None) is what
 #: the sweeper pushes on; older 4-tuples are still read everywhere.
 _JAN_GAME_PEER = {}
+#: member -> the address its game band last spoke from, for `_jan_pending_lines`
+#: when it runs on the sweeper thread rather than the member's own.
+_JAN_PEER_IP = {}
 
 
 def _jan_sweeper_push(members):
@@ -409,6 +461,23 @@ def _jan_pending_lines(member, on_sid=None, limit=None):
     got = _JAN_GAME_PEER.get(member)
     if not got:
         return []           # never seen their game band; nothing to frame with
+    # On the sweeper thread the per-thread build marker is unset, and an
+    # in-game record is shaped by the build it is going to. Borrow the address
+    # this member last spoke from, and put the thread back as it was.
+    _had = hasattr(_peer_build, "ip")
+    _was = getattr(_peer_build, "ip", None)
+    if not _was:
+        _peer_build.ip = _JAN_PEER_IP.get(member)
+    try:
+        return _jan_pending_lines_inner(member, got, on_sid=on_sid, limit=limit)
+    finally:
+        if _had:
+            _peer_build.ip = _was
+        elif hasattr(_peer_build, "ip"):
+            del _peer_build.ip
+
+
+def _jan_pending_lines_inner(member, got, on_sid=None, limit=None):
     if on_sid is not None and (len(got) < 4 or got[3] != on_sid):
         return []           # wrong connection -- leave them queued
     try:
@@ -422,6 +491,33 @@ def _jan_pending_lines(member, on_sid=None, limit=None):
     log("authserv", f"  jan: {len(recs)} queued record(s) for member {member} "
                     f"ride the <DR> reply")
     return [NoPad(_game_notice_line(b"GMJSG" + r, tgt, nk, sv)) for r in recs]
+
+
+def _jan_idle_due(member, sid, sess_fresh=True, limit=None):
+    """The Jan records a connection's idle tick should push, framed and ready.
+
+    Split out so the gate can be tested: `tools/jan_delta_e2e` drives it with
+    a stale session, which is the case that was broken.
+
+    WARNING: SILENCE IS NOT A DEAD SOCKET HERE. The core's idle push reads a
+    connection that has not spoken for `POL_PUSH_FRESH` seconds as a zombie,
+    which is right for Tetra Master (a client in a match speaks every 15 s).
+    A Jan client waiting for its turn record is quiet by construction, so that
+    gate suppressed exactly the record the player was waiting on, and every
+    delivery fell through to the 75 s deadline sweeper. The zombie hazard is
+    still covered, and better: `on_sid` pins the drain to the session this
+    member's game band last spoke on. `POL_JAN_PUSH_FRESH=1` restores the old
+    coupling.
+    """
+    if janhourou is None or not member:
+        return []
+    if os.environ.get("POL_JAN_IDLE_PUSH", "1") != "1":
+        return []
+    if os.environ.get("POL_JAN_PUSH_FRESH") == "1" and not sess_fresh:
+        return []
+    if limit is None:
+        limit = int(os.environ.get("POL_JAN_PUSH_CHUNK", "2") or 0) or None
+    return _jan_pending_lines(member, on_sid=sid, limit=limit)
 
 
 def notice(cls, payload, text, target, nick, srv, sess, tag=b"MJS"):
@@ -468,6 +564,10 @@ def notice(cls, payload, text, target, nick, srv, sess, tag=b"MJS"):
             if payload[1:2] != b"A":
                 _JAN_GAME_PEER[_jan_mid] = (target, nick, srv, _session_sid(),
                                             sess)
+                # ...and their ADDRESS, which is what says which build they
+                # run. The sweeper pushes from its own thread, where the
+                # per-thread marker is not set.
+                _JAN_PEER_IP[_jan_mid] = getattr(_peer_build, "ip", None)
         reply = janhourou.handle_line(payload[1:], peer="auth-band",
                                       member_id=_jan_mid)
     except Exception as e:
@@ -516,6 +616,8 @@ FETCH_PATHLEN = {
     # chosen. The length is still worth declaring (a short read is strictly
     # worse), but a WORKING settings screen needs a real blob, not the fallback.
     "b/g/MJSTableInfoSub": 816 + 4,
+    # Janhourou 2004 only: `0x299bf0(..., "U/g/MJSOptionData", 144)`.
+    "U/g/MJSOptionData": 144 + 4,
 }
 
 
@@ -547,6 +649,143 @@ RESOURCE_INIT = {
 #:   POL_JAN_LOBBY_LIVE=1       the default: live, but only inside Janhourou
 #:   POL_JAN_LOBBY_LIVE=force   live for every requester (ignores the title zone)
 #:   POL_JAN_LOBBY_LIVE=0       off; the authored blobs answer, as before
+#: PlayOnline's ACKY Gallery, sheets hnf202 and hnf203: the portraits the game
+#: itself gives its computer players, 8 tiles each. An index is sheet * 8 + tile,
+#: so the pair spans 202*8 .. 202*8+15.
+_JAN_ACKY_FACE = 202 * 8
+_JAN_ACKY_TILES = 16
+#: `jangame.Table.BOT_ID_BASE`. A seat with no human needs a NON-ZERO id here
+#: or the member dialog draws no row for it; the game's own notice mints its
+#: from the in-game table id, which this process cannot see, so this one is
+#: derived from the lobby id instead. Both are obviously synthetic and neither
+#: can collide with a real PolID.
+_JAN_BOT_ID_BASE = 0x0B07000000000000
+#: The icon sheets this server can back with art (the board's `faces` folder,
+#: baked from the user's own client). An index whose sheet is NOT on the
+#: client's drive makes its loader return -1 and clear the descriptor -- a
+#: blank seat, which is worse than the default portrait -- so an index we
+#: cannot back with art is served as 0 instead.
+_JAN_FACE_DIR = os.path.join(HERE, "boardart", "faces")
+_JAN_FACE_SHEETS = None
+
+
+def _jan_face_ok(idx):
+    """`idx` if its sheet is one we ship, else 0."""
+    global _JAN_FACE_SHEETS
+    idx = int(idx or 0)
+    if not idx:
+        return 0
+    if _JAN_FACE_SHEETS is None:
+        try:
+            _JAN_FACE_SHEETS = {
+                int(n[3:6]) for n in os.listdir(_JAN_FACE_DIR)
+                if n.startswith("hnf") and n.endswith(".png") and n[3:6].isdigit()}
+        except OSError:
+            _JAN_FACE_SHEETS = set()
+    return idx if (idx >> 3) in _JAN_FACE_SHEETS else 0
+
+
+#: member -> True once their build was resolved from an address that claimed
+#: the title, so the game band can answer for a proxied connection.
+_JAN_BUILD_BY_MEMBER = {}
+
+
+def _jan_peer_is_2004():
+    """True when the client on THIS thread runs Janhourou 20040727_2.
+
+    The two builds send byte-identical openers and the 3:0 request carries no
+    length, so the lobby cannot tell them apart from its own traffic. The patch
+    server can: each title checks its own patch channel before it launches and
+    claims its exact build there, which the patch server notes per address in
+    the shared `client-builds.json` (the same hand-over the portal eras use).
+    The most recently seen `*/0003` claim for this address decides: any P2U
+    (US Viewer) claim is the 2004 build, and a PS2 claim is judged by its
+    version.
+
+    The address is the core's per-thread marker (`_peer_build.ip`), set on the
+    lobby connection and on the auth session the game band rides.
+
+    POL_JAN_SAVE_2004: `auto` (default), `1` = everybody, `0` = nobody.
+    """
+    mode = os.environ.get("POL_JAN_SAVE_2004", "auto")
+    if mode in ("0", "1"):
+        return mode == "1"
+    if jansave is None:
+        return False
+    # WARNING: THE ADDRESS IS NOT ALWAYS THE PLAYER'S. The Jan GAME band rides the
+    # auth session, and that one can reach us proxied: the same player whose
+    # lobby fetches came from their own address can send every game-band line
+    # from 127.0.0.1, an address with no title claim at all. The test then
+    # answered "2002" for a 2004 client and every record on that band went out
+    # in the wrong shape -- silently, because a wrong layout draws as a wrong
+    # screen and never as an error. So the answer is remembered against the
+    # MEMBER, who is the same person whatever the transport, and the address
+    # is only how it is first learned.
+    _member = (_session_get("member_id") if _session_get else None) or 0
+    ip = getattr(_peer_build, "ip", None)
+    if not ip:
+        return bool(_JAN_BUILD_BY_MEMBER.get(_member)) if _member else False
+    try:
+        with open(CLIENT_BUILDS_PATH, encoding="utf-8") as f:
+            entry = json.load(f).get(ip) or {}
+    except (OSError, ValueError):
+        return False
+    claims = [(v.get("seen", ""), k, v.get("version", ""))
+              for k, v in entry.items() if k.endswith("/0003")]
+    if not claims:
+        # This address never claimed the title. If we learned the answer for
+        # this member on a connection that DID carry one, keep it.
+        return bool(_JAN_BUILD_BY_MEMBER.get(_member)) if _member else False
+    _seen, key, version = max(claims)
+    # A US Viewer (region P2U) can only ever install the 2004 build, and once
+    # it has taken an overlay from the P2U-0003 channel it claims THAT
+    # version, which the version test alone would read as the 2002 tree.
+    got = True if key.startswith("P2U/") else jansave.is_2004_version(version)
+    if _member:
+        _JAN_BUILD_BY_MEMBER[_member] = got
+    return got
+
+
+# WHICH BUILD IS BEING ANSWERED. janhourou turns game records into bytes, and
+# the 2004 client reads several of them differently (janmsgs2004). Same
+# per-thread test the lobby fetches use.
+janhourou.IS_2004 = _jan_peer_is_2004
+
+
+def _jan_save_for_build(path, data):
+    """`U/g/MJSUserData` as THIS client's build reads it.
+
+    Applied last, after `_jan_save_live` has patched the live record in using
+    2002 offsets. The 2004 build wants magic 0x02060300 and 1048 bytes; serving
+    it the 2002 blob is `JHR-650-13034` (measurements in `jansave.to_2004`).
+    The LENGTH moves with it in `resource_length`.
+    """
+    if jansave is None or path != JAN_USERDATA_PATH or not _jan_peer_is_2004():
+        return data
+    want = jansave.SIZE + jansave.TRAILER
+    try:
+        out = jansave.to_2004(data[:want].ljust(want, b"\x00"))
+    except ValueError as e:
+        log("lobby", f"  3:0 {path!r}: 2004 build, but NOT converted ({e})")
+        return data
+    log("lobby", f"  3:0 {path!r}: 2004 build (20040727_2) -- {want}B save moved "
+                 f"to the {len(out)}B layout, magic {jansave.MAGIC_2004:#010x}")
+    return out
+
+
+def _jan_resource_patch(path, data):
+    """The live record patched into the save, then the save reshaped for the
+    requester's build. A 2004 client's fresh blob arrives at the 2004 length
+    already (the core sized it from `resource_length`), so the converter is
+    handed the 2002 shape it expects and grows it back."""
+    if (path == JAN_USERDATA_PATH and jansave is not None
+            and _jan_peer_is_2004()):
+        want = jansave.SIZE + jansave.TRAILER
+        return _jan_save_for_build(
+            path, _jan_save_live(path, bytes(data[:want]).ljust(want, b"\x00")))
+    return _jan_save_live(path, data)
+
+
 def _jan_lobby_blob(path, n, req_pt=None):
     """Janhourou's zone / room / table list from LIVE room state, or None.
 
@@ -583,6 +822,10 @@ def _jan_lobby_blob(path, n, req_pt=None):
     try:
         if path == "b/g/ZL":
             blob = janlobby.zone_list_blob(live)
+            if _jan_peer_is_2004():
+                # The 2004 build keeps a flags byte at record +0x0C and reads
+                # the name from +0x0D (janlobby.zone_list_to_2004).
+                blob = janlobby.zone_list_to_2004(blob)
             what = "%d zone(s)" % len(janlobby.topology())
         elif path.startswith("b/g/RL"):
             zone = int(path[6:], 10)
@@ -593,6 +836,10 @@ def _jan_lobby_blob(path, n, req_pt=None):
                              f"blob rather than serving an EMPTY room list, "
                              f"which walks the client off its row table")
                 return None
+            if _jan_peer_is_2004():
+                # Its "Players" column is two biased nibble bytes at record
+                # +0x8F/+0x90, not the u32 at +0x10 (janlobby.room_list_to_2004).
+                blob = janlobby.room_list_to_2004(blob)
             what = "zone %d, %d room(s)" % (zone, len(janlobby.rooms_of(zone)))
         elif path == "b/g/MJSTableInfoSub":
             # The rules AND the member rows -- see janlobby's banner. Which
@@ -618,6 +865,7 @@ def _jan_lobby_blob(path, n, req_pt=None):
             else:
                 _tid = _base
             _seats, _params, _voices, _values = None, None, None, None
+            _faces = None
             if _tid:
                 _params = janlobby.table_params_text_for(_tid)
                 if janseats is not None and janseats.enabled():
@@ -629,11 +877,57 @@ def _jan_lobby_blob(path, n, req_pt=None):
                     # member sent at reserve time (MjPLAYREQ +0x42).
                     _voices = [janseats.voice_of(_by[i][2]) if i in _by else 0
                                for i in range(4)]
+                    # FaceType[seat] (+0x208): the PlayOnline handle-icon
+                    # index the member sent at reserve time (MjPLAYREQ +0x40).
+                    # The 2004 build loads `hnf<index>>3>.png` cell index&7
+                    # from the Viewer's icon folder; 0 draws the default.
+                    _faces = [_jan_face_ok(janseats.face_of(_by[i][2]))
+                              if i in _by else 0 for i in range(4)]
+                # THE BOTS ARE NOT IN THE SEAT STORE, AND THE GAME IS NOT
+                # IN THIS PROCESS. The seat store holds real reservations
+                # only, so a table played against three bots reported ONE
+                # member: the 2004 "Table N members" dialog draws a row per
+                # non-zero PolID in this blob, and the in-game plates take
+                # their portrait from FaceType beside it. The game manager
+                # knows the bots, but it lives in the AUTH session's process
+                # and this fetch is served by the lobby's -- `GAMES.by_lobby`
+                # is empty here, which is why looking there filled nothing.
+                # What IS shared is the seat store, so the test is: the table
+                # is in play and this seat holds no human, therefore a bot.
+                # Its name and portrait are derived, not looked up, so both
+                # processes agree without talking.
+                if (janseats is not None and janseats.enabled()
+                        and janseats.is_in_play(_tid)):
+                    if _seats is None:
+                        _seats = [None] * 4
+                    if _faces is None:
+                        _faces = [0] * 4
+                    for _s in range(4):
+                        if _seats[_s] is not None:
+                            continue
+                        _seats[_s] = (_JAN_BOT_ID_BASE | (int(_tid) << 8) | _s,
+                                      janhourou.BOT_NAME % _s
+                                      if janhourou is not None else "COM %d" % _s)
+                        # A bot has no PlayOnline handle and so no icon of its
+                        # own. The game gives its computer players one of the
+                        # ACKY Gallery portraits (sheets hnf202 + hnf203), the
+                        # same pair the watch page draws. Steady per seat, so a
+                        # face never changes under the player mid-hand.
+                        _faces[_s] = _JAN_ACKY_FACE + ((int(_tid) + _s)
+                                                       % _JAN_ACKY_TILES)
                 # THE RULES THE MASTER CHOSE (finding 2), or the defaults.
                 if janrules is not None:
                     _values = janrules.values_for(_tid)
+            if os.environ.get("POL_JAN_FACE", "1") != "1":
+                _faces = None
             blob = janlobby.mjs_table_info_blob(values=_values, seats=_seats,
-                                                params=_params, voices=_voices)
+                                                params=_params, voices=_voices,
+                                                faces=_faces)
+            if _jan_peer_is_2004():
+                # 1040 bytes in that build, with the CSV at +0x3CC; an 816-byte
+                # reply is what made every table ask for a password
+                # (janlobby.table_info_to_2004).
+                blob = janlobby.table_info_to_2004(blob)
             what = ("%d rule settings%s, table %s: %s"
                     % (janlobby.MJS_TI_COUNT,
                        " (master's)" if (janrules is not None and _tid
@@ -827,6 +1121,35 @@ def _jan_save_live(path, data):
                                  f"master seat {_master} -> "
                                  f"{'MASTER' if _mine[0] == _master else 'guest'}"
                                  f"{', game IN PLAY -> Rejoin' if _playing else ''}")
+        # WHERE "Back to Room" GOES. The 2004 build validates the destination
+        # against the lists before it dials: the zone byte at +0x3C5 against
+        # `b/g/ZL` +0x3C and the room u64 at +0x010 against `b/g/RL%03d` +0x00
+        # (jansave.apply_return_room). Served zero, both lookups miss and the
+        # menu item can only answer JHR-0-13172, "the destination zone was not
+        # found". The 2002 build has no such branch, which is why these two
+        # fields were never load-bearing before.
+        if os.environ.get("POL_JAN_SAVE_ROOM", "1") == "1":
+            _room = _jan_member_room(member)
+            _zid = _rid = None
+            if _room is not None:
+                _zid, _rid, _why = _room.zone, _room.id, _room.name
+            elif janseats is not None and janseats.enabled():
+                # The channel registry only knows a member who is JOINed right
+                # now, and the save is fetched at the title screen where they
+                # are not. The seat store still holds the composite table id,
+                # whose room half IS the `b/g/RL%03d` id (janlobby.Room.id =
+                # zone * 100 + index), so the zone is its hundreds digit.
+                _t = janseats.table_of(member)
+                _r = janseats.room_of_table(_t) if _t else 0
+                if _r:
+                    _zid, _rid, _why = _r // 100, _r, "from the seat store"
+            if _rid:
+                out = jansave.apply_return_room(out, zone_id=_zid, room_id=_rid)
+                log("lobby", f"  {path!r}: Back to Room -> zone {_zid}, "
+                             f"room {_rid} ({_why})")
+            else:
+                log("lobby", f"  {path!r}: member {member} is in no room -- "
+                             f"Back to Room left unset")
         if applied:
             log("lobby", f"  {path!r}: member {member}'s live record patched in -- "
                          + ", ".join("%s %d->%d" % (k, o, nw)
@@ -962,6 +1285,22 @@ def resource_length(path):
     requester's own title first (`titles.resource_length(path, zone=...)`),
     so a Tetra Master player's lengths are that title's.
     """
+    if path == "b/g/MJSTableInfoSub" and _jan_peer_is_2004():
+        # THE 2004 BUILD ASKS FOR 1040, NOT 816 (JanHouRou.pex 20040727_2:
+        # `0x299bf0(..., "b/g/MJSTableInfoSub", 1040)`).
+        n = janlobby.MJS_TI_TOTAL_2004 + 4
+        log("lobby", f"  3:0 {path!r}: 2004 build -- serving {n} "
+                     f"({janlobby.MJS_TI_TOTAL_2004} + 4 trailer), not "
+                     f"{FETCH_PATHLEN.get(path)}")
+        return n
+    if path == JAN_USERDATA_PATH and _jan_peer_is_2004():
+        # THE 2004 BUILD ASKS FOR 1048, NOT 976 (JanHouRou.pex 20040727_2,
+        # 0x0029c39c `addiu a2,zero,1048`). +4 is the opcode's trailer.
+        n = jansave.SIZE_2004 + 4
+        log("lobby", f"  3:0 {path!r}: 2004 build -- serving {n} "
+                     f"({jansave.SIZE_2004} + 4 trailer), not "
+                     f"{FETCH_PATHLEN.get(path)}")
+        return n
     if os.environ.get("POL_JAN_LOBBY_LIVE", "1").strip().lower() in ("0", "off", "no", ""):
         return None
     if path == "b/g/PTL":
@@ -1002,18 +1341,18 @@ def _idle_pushes(member_id, peers):
     seat that is not talking wait in `Table.outbox` and were drained only
     when that member SPOKE -- on the game band (`handle_line`) or on their
     `<DR>` poll. Both of those are replies, and an in-game client that is
-    waiting for us SENDS NOTHING: measured live 2026-09-04, seat 0 discarded
-    at 02:21:04, seat 1's private MjTSUMO went to its outbox, and 20 s later
-    it had still not moved because seat 1 -- correctly -- had nothing to
-    say. `<DR>` does not help either: that poll is gated on LobbyState == 15
-    and stops the moment the player enters the table.
+    waiting for us SENDS NOTHING: seat 0 discards, seat 1's private MjTSUMO
+    goes to its outbox, and seat 1 -- correctly -- has nothing to say, so
+    nothing moves. `<DR>` does not help either: that poll is gated on
+    LobbyState == 15 and stops the moment the player enters the table.
 
     PINNED to this connection (the session id, not the nick: a player holds
     several connections and they share a nick), and CAPPED: a batch the
     client cannot apply in one go advances it not at all; the remainder
     stays queued for the next tick, seconds away. The core frames each body
     as `G<tag>G<record>` to the peer named here and sends it down this
-    connection.
+    connection. Quiet connections are asked too (`idle_push_when_quiet`):
+    see `_jan_idle_due` for why silence is not a dead socket here.
     """
     if os.environ.get("POL_JAN_IDLE_PUSH", "1") != "1" or not member_id:
         return []
@@ -1021,12 +1360,23 @@ def _idle_pushes(member_id, peers):
     if not got or len(got) < 4 or got[3] != _session_sid():
         return []
     limit = int(os.environ.get("POL_JAN_PUSH_CHUNK", "2") or 0) or None
+    # The records are shaped for the build they go to, which the per-thread
+    # marker says; borrow the member's last game-band address if it is unset.
+    _had = hasattr(_peer_build, "ip")
+    _was = getattr(_peer_build, "ip", None)
+    if not _was:
+        _peer_build.ip = _JAN_PEER_IP.get(member_id)
     try:
         recs = janhourou.take_pending(member_id, peer="dr-band", limit=limit)
     except Exception as exc:
         log("authserv", f"  jan idle push drain raised ({exc!r}) -- the queue "
                         f"is untouched, so the next tick retries")
         return []
+    finally:
+        if _had:
+            _peer_build.ip = _was
+        elif hasattr(_peer_build, "ip"):
+            del _peer_build.ip
     return [(got[0], r) for r in recs]
 
 
@@ -1084,6 +1434,7 @@ class Janhourou(titles.Title):
         # Jan channel the asker is JOINed to, and the core's room registry is
         # where that is known. `janhourou.member_room` reads it through this.
         janhourou.LIVE_ROOMS = _live_rooms
+        janhourou.IS_2004 = _jan_peer_is_2004
         _install_sweeper()
 
     def describe(self):
@@ -1129,6 +1480,14 @@ class Janhourou(titles.Title):
     def idle_pushes(self, member_id, peers):
         return _idle_pushes(member_id, peers)
 
+    @property
+    def idle_push_when_quiet(self):
+        # A core that gates its idle push on the connection having spoken
+        # recently asks this title anyway: a Jan client waiting for its turn
+        # record is silent (see `_jan_idle_due`). POL_JAN_PUSH_FRESH=1 puts
+        # Janhourou back behind the gate.
+        return os.environ.get("POL_JAN_PUSH_FRESH") != "1"
+
     def requeue_pushes(self, member_id, items, why=""):
         # A record the socket refused is lost, as it always was: the table
         # re-sends its state on the seat's next line, and a seat whose
@@ -1156,7 +1515,7 @@ class Janhourou(titles.Title):
         return None
 
     def resource_patch(self, path, data, subject):
-        return _jan_save_live(path, data)
+        return _jan_resource_patch(path, data)
 
     # --- the member profile ---
     def profile_fields(self, cid, member_id):

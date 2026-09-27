@@ -239,6 +239,26 @@ def table_state_for(seated, capacity=4, in_play=False):
     return 4                                    # すぐゲームできます -- Start ungreys
 
 
+#: WARNING: THE CLIENT DELETES ASCII SPACES FROM THIS NAME, so a plain "Room 1-1"
+#: reaches the player as "Room1-1". The format string
+#: `Now entering` + newline + `%s.` lives at 2004-module VA 0x004B30D0 and has
+#: exactly ONE xref, at 0x003BD450; the buffer it substitutes is filled by
+#: 0x003BD000, a byte-at-a-time copy loop that compares each character against
+#: 0x20 and SKIPS the ones that match:
+#:
+#:      0x3BD030  addiu $v1, $zero, 0x20     ; the space
+#:      0x3BD044  bne   $a0, $v1, store      ; anything else is kept
+#:      0x3BD04C  b     next                 ; a space is dropped
+#:
+#: A cp932 FULL-WIDTH space is 0x81 0x40, and neither byte is 0x20, so it walks
+#: through the filter untouched and draws as a real gap. `_text` encodes cp932,
+#: so putting U+3000 in the name is all it takes. This is DATA, not a patch --
+#: the loop is SE's own code and this project does not patch client behaviour.
+#: `POL_JAN_NAME_GAP` overrides it: a plain space restores the squashed
+#: display, an empty value drops the separator.
+NAME_GAP = os.environ.get("POL_JAN_NAME_GAP", "　")
+
+
 def _text(s, limit):
     """Shift-JIS, NUL-terminated, hard-truncated to the field width."""
     if isinstance(s, bytes):
@@ -373,7 +393,7 @@ class Room(object):
         # Ours too, and for the same reason as the zone names above. SE's room
         # names in the twin game are things like `Freewheeler Room 1` and
         # `Novice Hall`; ours are numbered because we do not know Janhourou's.
-        self.name = "Room %d-%d" % (zone, index)
+        self.name = "Room%s%d-%d" % (NAME_GAP, zone, index)
         self.channel = "#MJS0R0%d%d" % (zone, index)
         self.tables = tables
 
@@ -684,6 +704,150 @@ def zone_list_blob(live, host=None):
         buf[o + ZL_F_HOST:o + ZL_F_ID] = _text(host or JAN_HOST,
                                                ZL_F_ID - ZL_F_HOST)
         buf[o + ZL_F_ID] = z.id & 0x7F
+    return bytes(buf)
+
+
+#: THE 2004 BUILD (20040727_2) READS A FLAGS BYTE WHERE THE 2002 NAME STARTS.
+#: Measured 2026-09-21 in its Copy_Zone_Information, 0x003b8830 (module base
+#: 0x280000; the record is at list+0x48, so `84(t1)` is record +0x0C):
+#:
+#:     003b887c  lbu  v1, 84(t1)         ; record +0x0C
+#:     003b8880  andi v1, v1, 0x000c     ; either bit set -> the row is DROPPED
+#:     003b8960  lbu  v1, 84(v1)
+#:     003b8964  andi v1, v1, 0x0040     ; -> a per-zone flag word, 1 or 0
+#:     003b894c  addiu a1, v1, 85        ; the NAME is copied from record +0x0D
+#:
+#: +0x00/+0x04/+0x08, the host at +0x2C and the id at +0x3C are read where the
+#: 2002 build reads them, and the list is still 0x848 bytes. Served the 2002
+#: record, this build showed "arlour 1" and took the 'P' (0x50) as flags, which
+#: sets 0x40. WHAT 0x40 MEANS IS NOT MEASURED; zero is the plain row.
+ZL_F_FLAGS_2004 = 0x0C
+ZL_F_NAME_2004 = 0x0D
+
+
+def zone_list_to_2004(blob):
+    """`b/g/ZL` with each record's name moved to +0x0D behind a zero flags byte."""
+    buf = bytearray(blob)
+    if len(buf) < ZL_HDR:
+        return blob
+    n = min(struct.unpack_from("<I", buf, ZL_COUNT_OFF)[0],
+            (len(buf) - ZL_HDR) // ZL_REC)
+    for i in range(n):
+        o = ZL_HDR + i * ZL_REC
+        name = bytes(buf[o + ZL_F_NAME:o + ZL_F_HOST])
+        keep = ZL_F_HOST - ZL_F_NAME_2004                   # 31 bytes, NUL included
+        buf[o + ZL_F_FLAGS_2004] = 0
+        buf[o + ZL_F_NAME_2004:o + ZL_F_HOST] = (name[:keep - 1] + b"\0").ljust(keep, b"\0")
+    return bytes(buf)
+
+
+#: `b/g/MJSTableInfoSub` IS 1040 BYTES IN THE 2004 BUILD (20040727_2), NOT 816.
+#: Measured 2026-09-21 (module base 0x280000). The fetch is
+#: `0x299bf0(..., "b/g/MJSTableInfoSub", 1040)` and the member window copies the
+#: blob field by field at 0x313a44..0x313c24:
+#:
+#:     2002      2004
+#:               +0x000   NEW: 0x40 bytes at the FRONT -- NOT DECODED, served
+#:                        zero. Corrected 2026-09-21: this block was first
+#:                        guessed to sit at +0x020 with the PolIDs left at
+#:                        +0x000, and that is what made the "Table N members"
+#:                        dialog draw a bullet and no name. The 2004 member
+#:                        window memcpy's all 1040 bytes to `this+0x1008`
+#:                        (0x313d60) and its fill reads the PolIDs at
+#:                        blob+0x40 (`ld 4168` = 0x1008+0x40, 0x3144c8 and the
+#:                        row loop at 0x314838), drawing a row ONLY for a
+#:                        non-zero PolID. Served at +0x000 they read as four
+#:                        zeros, so no row had a name. The shift matches the
+#:                        rest of this map, where Config also moves by +0x40.
+#:     +0x000    +0x040   4 x u64 PolID
+#:     +0x020    +0x060   Config: 33 records, 12 bytes -> 16 (reader 0x30a460:
+#:                        `addiu s1,a1,96` / `addiu s1,s1,16` / `slti s0,33`);
+#:                        the first 12 bytes of a record are laid out as before
+#:     +0x1AC    +0x270   Rule (24 bytes read)
+#:     +0x1C8    +0x288   TableRule, 64 -> 96 bytes. The rate is still at
+#:                        TableRule+0x24 (0x28954c pairs with 2002's 0x287994);
+#:                        the tsumo timer byte moved from TableRule+0x2F to
+#:                        TableRule+0x49 = +0x2D1 (0x2a5f14 pairs with 0x2c2164)
+#:     +0x208    +0x2E8   FaceType
+#:     +0x218    +0x2F8   VoiceType, 4 x u16
+#:     +0x220    +0x300   Volume
+#:     +0x228    +0x308   Domain
+#:     +0x22C    +0x30C   names, 4 x 16
+#:     +0x26C    +0x34C   master comment, 128
+#:     +0x2EC    +0x3CC   the parameter CSV
+#:     +0x32C    +0x40C   u32
+#:
+#: WHY IT MATTERS: the reserve path (state 51, 0x3abcc4) sscanf's the CSV at
+#: blob+0x3CC and opens TablePasswordInput when its 10th field is non-zero.
+#: Served 816 bytes, it parsed whatever lay past the end, and every table asked
+#: for a password. The same short blob also gave it the wrong rules, timer,
+#: voices and member names.
+#:
+#: NOT MEASURED: the rest of the 96-byte TableRule. Only the two fields above
+#: are placed; the 2002 bytes between +0x28 and +0x40 other than the timer are
+#: not carried, because where they went is not known.
+MJS_TI_TOTAL_2004 = 1040
+MJS_TI_REC_OFF_2004 = 0x60
+MJS_TI_REC_2004 = 16
+_TI_MOVES_2004 = (
+    # (2002 offset, 2004 offset, length)
+    (0x000, 0x040, 0x20),                   # PolIDs (see the note above)
+    (0x1AC, 0x270, 24),                     # Rule
+    (0x1C8, 0x288, 0x28),                   # TableRule through the rate word
+    (0x208, 0x2E8, 16),                     # FaceType
+    (0x218, 0x2F8, 8),                      # VoiceType
+    (0x220, 0x300, 8),                      # Volume
+    (0x228, 0x308, 4),                      # Domain
+    (0x22C, 0x30C, 64),                     # names
+    (0x26C, 0x34C, 128),                    # master comment
+    (0x2EC, 0x3CC, 64),                     # parameter CSV
+    (0x32C, 0x40C, 4),
+)
+MJS_TI_TSUMO_TIMER_2004 = 0x2D1
+
+
+def table_info_to_2004(blob):
+    """An 816-byte `b/g/MJSTableInfoSub` in the 2004 build's 1040-byte layout."""
+    src = bytes(blob[:MJS_TI_TOTAL]).ljust(MJS_TI_TOTAL, b"\0")
+    out = bytearray(MJS_TI_TOTAL_2004)
+    for old, new, n in _TI_MOVES_2004:
+        out[new:new + n] = src[old:old + n]
+    for i in range(MJS_TI_COUNT):
+        o = MJS_TI_REC_OFF + i * MJS_TI_REC
+        n = MJS_TI_REC_OFF_2004 + i * MJS_TI_REC_2004
+        out[n:n + MJS_TI_REC] = src[o:o + MJS_TI_REC]
+    out[MJS_TI_TSUMO_TIMER_2004] = src[MJS_TI_TSUMO_TIMER]
+    return bytes(out)
+
+
+#: THE 2004 BUILD DRAWS THE ROOM LIST'S "Players" COLUMN FROM TWO BIASED BYTES.
+#: Measured 2026-09-21, 0x003b6bdc (the 2002 twin at 0x00340308 is
+#: `lw a2, 16(s3)`, the u32 at record +0x10):
+#:
+#:     003b6bdc  lb a2, 143(s3)         ; record +0x8F
+#:     003b6be8  lb v1, 144(s3)         ; record +0x90
+#:     003b6bec  addiu v0, a2, -32  /  sll a2, v0, 4
+#:     003b6bf4  addiu v0, v1, -32  /  or  a2, a2, v0
+#:
+#: i.e. players = ((rec[0x8F] - 0x20) << 4) | (rec[0x90] - 0x20): a high and a
+#: low nibble, each stored +0x20 like the open-tables byte at +0x86 (which both
+#: builds read the same way). Left zero they draw as -32.
+RL_F_PLAYERS_HI_2004 = 0x8F
+RL_F_PLAYERS_LO_2004 = 0x90
+
+
+def room_list_to_2004(blob):
+    """`b/g/RL%03d` with the 2004 build's two player-count bytes filled in."""
+    buf = bytearray(blob)
+    if len(buf) < RL_HDR:
+        return blob
+    n = min(struct.unpack_from("<I", buf, RL_COUNT_OFF)[0],
+            (len(buf) - RL_HDR) // RL_REC)
+    for i in range(n):
+        o = RL_HDR + i * RL_REC
+        players = min(struct.unpack_from("<I", buf, o + RL_F_PLAYERS)[0], 0xFF)
+        buf[o + RL_F_PLAYERS_HI_2004] = 0x20 + (players >> 4)
+        buf[o + RL_F_PLAYERS_LO_2004] = 0x20 + (players & 0x0F)
     return bytes(buf)
 
 
@@ -1098,12 +1262,28 @@ MJS_TI_RATE = 0x1EC
 
 #: FaceType[0..3] u32 +0x208, VoiceType[0..3] u16 +0x218, Volume[0..3] u16
 #: +0x220, Domain[0..3] u8 +0x228 -- the client's own debug dump names all
-#: four (lmenu.c:765-780). Only VoiceType has a READER: lobby.c:138 feeds the
-#: four u16 to `sort__002cf250`, which streams `voice%02d.blk` for each seat
-#: and sets the per-seat voice-id base `(type+1)*1000`. FaceType, Volume and
-#: Domain are never loaded outside the dump (the face sprites come from the
-#: PFG Face0..3 elements), so they stay zero on purpose -- writing a value
-#: nothing reads is a guess that cannot be checked.
+#: four (lmenu.c:765-780). In the 2002 build only VoiceType has a READER:
+#: lobby.c:138 feeds the four u16 to `sort__002cf250`, which streams
+#: `voice%02d.blk` for each seat and sets the per-seat voice-id base
+#: (type+1)*1000. Volume and Domain are never loaded outside the dump, so they
+#: stay zero -- writing a value nothing reads is a guess that cannot be checked.
+#:
+#: WARNING: THE 2004 BUILD DOES READ FaceType, and it is a PLAYONLINE HANDLE-ICON
+#: INDEX. Measured 2026-09-21: 0x0029e13c takes the addresses of +0x2E8
+#: (FaceType, the 2004 home of +0x208) and +0x2F8 and calls 0x00308410, which
+#: per seat hands FaceType[s] to the `sqFaceLoad.cc` cache at 0x003a6260. That
+#: asks the POL SDK for `hnf%03d.png` where the sheet is index >> 3, takes cell
+#: index & 7, and draws a 64x96 tile from the 4x2 grid into the PFG Face0..3
+#: FRAME. The 2002 module has no reader for +0x208 at all and its
+#: `&TitleSetPOLpro.FaceType[n] = %d` debug string is gone from the 2004 one.
+#: The value the client itself sends for its own seat is MjPLAYREQ +0x40, the
+#: u16 beside the voice (janhourou.PLAYREQ_FACE_OFF).
+#:
+#: WARNING: THE ART IS DOWNLOADED CONTENT, NOT DISC ART: the sheets live in the
+#: Viewer's `data/icon/download/`, and a drive that never downloaded them has
+#: only hnf000. Serving an index whose sheet is absent makes the loader return
+#: -1 and clear the descriptor -- a BLANK seat, worse than the default
+#: portrait. They ship on the Viewer channel as P2U/1000 20130102_0.
 MJS_TI_FACETYPE = 0x208
 MJS_TI_VOICETYPE = 0x218
 MJS_TI_VOLUME = 0x220
@@ -1147,7 +1327,7 @@ except ImportError:                         # standalone run without the sibling
 
 
 def mjs_table_info_blob(values=None, seats=None, params=None, voices=None,
-                        rate=None):
+                        rate=None, faces=None):
     """`b/g/MJSTableInfoSub` -- 816 bytes, 33 rule records at +0x20.
 
     `seats` is `[(polid, name), ...]` in SEAT order (None for an empty seat) and
@@ -1203,6 +1383,9 @@ def mjs_table_info_blob(values=None, seats=None, params=None, voices=None,
         buf[MJS_TI_PARAMS:MJS_TI_PARAMS + n] = raw[:n]
     for i, v in enumerate((voices or [])[:4]):
         struct.pack_into("<H", buf, MJS_TI_VOICETYPE + 2 * i, int(v or 0) & 0xFFFF)
+    for i, fv in enumerate((faces or [])[:4]):
+        struct.pack_into("<I", buf, MJS_TI_FACETYPE + 4 * i,
+                         int(fv or 0) & 0xFFFFFFFF)
     if rate is None:
         try:
             import janstats as _js
@@ -1424,6 +1607,19 @@ def selftest():
     check("PTL every table has a name (a nameless table is DROPPED)",
           all(p[PTL_TABLE_OFF + i * PTL_TABLE_REC + PTL_T_NAME] != 0
               for i in range(4)))
+    # WARNING: A ROOM NAME MUST CARRY NO 0x20. The client's own copy loop at
+    # 0x003BD000 deletes every ASCII space on the way into the "entering"
+    # message, so a plain space is not a cosmetic choice -- it is a space that
+    # will not be there. See NAME_GAP.
+    _rname = topology()[0].rooms[0].name
+    check("a room name survives the client's space filter (no 0x20 in it)",
+          b"\x20" not in _text(_rname, RL_NAME_MAX).split(b"\x00")[0])
+    check("...and it still HAS a separator, so the words do not run together",
+          _rname.startswith("Room") and _rname[4] not in "0123456789")
+    os.environ["POL_JAN_NAME_GAP"] = " "
+    check("POL_JAN_NAME_GAP restores the plain space for a rollback",
+          " " in ("Room%s1-1" % os.environ["POL_JAN_NAME_GAP"]))
+    os.environ.pop("POL_JAN_NAME_GAP", None)
     check("PTL declared length is 23024 + 4 = the compose override",
           ptl_content_length() == 23024)
     check("PTL content ends inside the declared length",
@@ -1653,9 +1849,15 @@ def selftest():
     _ti = mjs_table_info_blob(voices=[3, 0, 7, 1], rate=1000)
     check("VoiceType[seat] is a u16 at +0x218 + 2*seat (lobby.c:138)",
           struct.unpack_from("<4H", _ti, MJS_TI_VOICETYPE) == (3, 0, 7, 1))
-    check("FaceType/Volume/Domain stay zero -- nothing reads them",
-          _ti[MJS_TI_FACETYPE:MJS_TI_VOICETYPE] == bytes(16)
-          and _ti[MJS_TI_VOLUME:MJS_TI_NAMES] == bytes(12))
+    check("Volume/Domain stay zero -- nothing reads them",
+          _ti[MJS_TI_VOLUME:MJS_TI_NAMES] == bytes(12))
+    check("FaceType stays zero when no face is given (the default portrait)",
+          _ti[MJS_TI_FACETYPE:MJS_TI_VOICETYPE] == bytes(16))
+    _tf = mjs_table_info_blob(faces=[2439, 1616, 1617, 0])
+    check("FaceType[seat] is a u32 at +0x208 + 4*seat (2004 reader 0x29e13c)",
+          struct.unpack_from("<4I", _tf, MJS_TI_FACETYPE) == (2439, 1616, 1617, 0))
+    check("...and a face does not disturb the voice banks beside it",
+          _tf[MJS_TI_VOICETYPE:MJS_TI_VOLUME] == bytes(8))
     check("the JAN rate lands at +0x1EC (console.c:4195 -> '1P = %d JAN')",
           struct.unpack_from("<I", _ti, MJS_TI_RATE)[0] == 1000)
     check("the rate defaults to janstats.RATE, never 0",

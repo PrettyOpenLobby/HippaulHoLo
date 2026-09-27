@@ -849,7 +849,8 @@ def deltas_after(have, room=0):
 
 # --- the writer API (auth band) ----------------------------------------------
 
-def reserve(table_id, member_id, name="", polid=0, tag=None, voice=None):
+def reserve(table_id, member_id, name="", polid=0, tag=None, voice=None,
+            face=None):
     """Seat `member_id` at `table_id`. Returns (result, my_seat, master_seat).
 
     First body in -> seat 0 + ReserveMaster (2); later ones -> the next free
@@ -887,6 +888,8 @@ def reserve(table_id, member_id, name="", polid=0, tag=None, voice=None):
                 mine["rtag"] = int(tag) & 0xF
             if voice is not None:
                 mine["voice"] = int(voice) & 0xFFFF
+            if face is not None:
+                mine["face"] = int(face) & 0xFFFF
             if not entry.get("master"):
                 entry["master"] = member_id     # vacant mastership: claimed by
             result = RESERVE_MASTER if entry.get("master") == member_id else RESERVE
@@ -906,6 +909,8 @@ def reserve(table_id, member_id, name="", polid=0, tag=None, voice=None):
             seats[str(member_id)]["rtag"] = int(tag) & 0xF
         if voice is not None:
             seats[str(member_id)]["voice"] = int(voice) & 0xFFFF
+        if face is not None:
+            seats[str(member_id)]["face"] = int(face) & 0xFFFF
         result = RESERVE_MASTER if entry.get("master") == member_id else RESERVE
         _publish()
         return result, seat, _master_seat(entry)
@@ -958,6 +963,16 @@ def voice_of(member_id):
         s = _fresh_seats(entry).get(str(int(member_id or 0)))
         if s is not None:
             return int(s.get("voice") or 0)
+    return 0
+
+
+def face_of(member_id):
+    """The PlayOnline handle-icon index the member sent at reserve time
+    (MjPLAYREQ +0x40). 0 = none, which draws the default portrait."""
+    for tid, entry in (_live_tables() or {}).items():
+        s = _fresh_seats(entry).get(str(int(member_id or 0)))
+        if s is not None:
+            return int(s.get("face") or 0)
     return 0
 
 
