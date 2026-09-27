@@ -175,6 +175,38 @@ def main():
     check("...draining to empty, losing nothing",
           len(jantitle._jan_pending_lines(6, on_sid="SID1")) == 1)
 
+    # WARNING: THE IDLE TICK MUST PUSH TO A SILENT CLIENT -- that is the whole point
+    # of it. The core's freshness gate (`POL_PUSH_FRESH`) treats a connection
+    # that has not spoken in 25 s as a zombie, and a Jan client waiting for its
+    # own turn record says NOTHING, so the gate suppressed the record the
+    # player was waiting for and every delivery fell through to the
+    # 75 s deadline sweeper -- i.e. the draw landed at the same instant the
+    # timeout expired it, until the seat was struck out and given to a CPU.
+    _gt.queue_for(1, janwire.pack(opcode=14, length=0x18)[:0x18])
+    check("a SILENT connection still gets its queued record (sess_fresh=False)",
+          len(jantitle._jan_idle_due(6, "SID1", sess_fresh=False)) == 1)
+    _gt.queue_for(1, janwire.pack(opcode=14, length=0x18)[:0x18])
+    check("...but the wrong session still frames nothing, fresh or not",
+          jantitle._jan_idle_due(6, "SID2", sess_fresh=True) == []
+          and len(jantitle._jan_idle_due(6, "SID1")) == 1)
+    _gt.queue_for(1, janwire.pack(opcode=14, length=0x18)[:0x18])
+    os.environ["POL_JAN_PUSH_FRESH"] = "1"
+    check("POL_JAN_PUSH_FRESH=1 restores the old coupling (the rollback lever)",
+          jantitle._jan_idle_due(6, "SID1", sess_fresh=False) == []
+          and len(jantitle._jan_idle_due(6, "SID1", sess_fresh=True)) == 1)
+    check("...and the title then tells the core to gate it like the others",
+          not jantitle.Janhourou().idle_push_when_quiet)
+    os.environ.pop("POL_JAN_PUSH_FRESH")
+    check("by default the title asks the core to push to a quiet connection",
+          jantitle.Janhourou().idle_push_when_quiet)
+    _gt.queue_for(1, janwire.pack(opcode=14, length=0x18)[:0x18])
+    os.environ["POL_JAN_IDLE_PUSH"] = "0"
+    check("POL_JAN_IDLE_PUSH=0 still declines entirely",
+          jantitle._jan_idle_due(6, "SID1") == [])
+    os.environ.pop("POL_JAN_IDLE_PUSH")
+    check("...and declining left the record queued",
+          len(jantitle._jan_pending_lines(6, on_sid="SID1")) == 1)
+
     os.environ["POL_JAN_DELTAS"] = "0"
     check("POL_JAN_DELTAS=0 declines, leaving the old behaviour untouched",
           ask(0) == (None, False))

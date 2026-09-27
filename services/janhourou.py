@@ -48,6 +48,14 @@ except ImportError:                                             # pragma: no cov
     jangame = None
     janmsgs = None
 try:
+    # THE 2004 BUILD'S IN-GAME LAYOUTS (20040727_2). janmsgs builds every
+    # record in the 2002 shape; three of them are read differently by the 2004
+    # client, so a record bound for one goes through here first. Optional like
+    # the rest: absent, every client is served the 2002 shape.
+    import janmsgs2004                                          # noqa: E402
+except ImportError:                                             # pragma: no cover
+    janmsgs2004 = None
+try:
     # ONLY for turning a member id into the name a person recognises -- see
     # `display_name`. Optional exactly as in responders.py: absent, a seat draws
     # blank rather than drawing something invented.
@@ -126,6 +134,16 @@ OPCODES = (
     # returns 3 for it (a system line). Named here so the log stops calling
     # it "Mj Non Defind...(72)".
     'MjCHATINFO',
+    # 73..100 exist only in the 2004 build (20040727_2), whose table at
+    # 0x00485750 has 112 names. It also calls 72 MjCHATINFOMSG and reuses 15
+    # as MjNOTICECANCEL. Only 92/93 are used on the wire.
+    'UdCONNECT', 'UdCONNECTACK', 'UdDISCONNECT', 'UdDISCONNECTACK', 'UdGETSAVEDATA',
+    'UdGETSAVEDATASTATUS', 'UdGETSAVEDATAACK', 'UdSETSAVEDATA', 'UdSETSAVEDATASTATUS',
+    'UdSETSAVEDATAACK', 'UdSAVEDATAPACKET', 'UdDETECT', 'UdDETECTACK', 'UdPLAYERLIST',
+    'UdPLAYERLISTACK', 'EmENTRYEVENT', 'EmENTRYEVENTACK', 'EmEVENTOPENCLOSE',
+    'EmREPORTRANKINGID', 'EmISEVENT', 'EmISEVENTACK', 'CmNOTICEMSGOPEN',
+    'CmNOTICEMSGCLOSE', 'CmNOTICEJANHOLOWKICK', 'EmEVENTPARTICIPANTADD',
+    'EmEVENTPARTICIPANTADDACK', 'EmGETEVENTPARTICIPANT', 'EmGETEVENTPARTICIPANTACK',
 )
 
 # The seven TGM_NOTICE_* names at 0x00417040. rec[0x17] routes into queues 2..8
@@ -242,6 +260,13 @@ RESERVE_TAG_OPCODES = (MjPLAYREQ, MjPLAYCANCEL, MjGALLEYREQ, MjGALLEYLEAVEREQ)
 #: object's +0xb6, and `objstrings__002ca990` writes that as `uStack_1be`,
 #: i.e. +0x42 of the 0x108-byte reserve record. It is the voice bank
 #: `b/g/MJSTableInfoSub` +0x218 must serve back for the seat (lobby.c:138).
+#: MjPLAYREQ +0x40, u16 LE -- the player's PlayOnline HANDLE-ICON index,
+#: beside the voice at +0x42. The 2004 build reads a face per seat out of
+#: `b/g/MJSTableInfoSub` and loads `hnf%03d.png` (index >> 3), cell
+#: index & 7, from the Viewer's icon download folder. The client builds
+#: the record at 0x003935e0 from its identity block: block+0x14 lands
+#: here and block+0x16 at the voice, which is what pins the pair.
+PLAYREQ_FACE_OFF = 0x40
 PLAYREQ_VOICE_OFF = 0x42
 
 #: MjMEMBERBANISH +0x28 (u64): the TARGET's PolID -- `malloc__002c4fb0`'s
@@ -421,6 +446,27 @@ ACK_SUB = 5
 #   POL_JAN_LNDV_F34 / _F36   the u16 and u8 (unchecked here, default 0)
 #   POL_JAN_LNDV_BODY  raw hex for the whole tail from +0x18, overrides the six
 GM_VERSION = 0x20020227             # measured: the compare at 0x002ca8e0
+
+# THE 2004 CLIENT READS A DIFFERENT LAYOUT AND DEMANDS A DIFFERENT VERSION.
+# Measured 2026-09-21 on build 20040727_2 (the Janhourou the Dirge of Cerberus
+# and Front Mission Online discs install), from a savestate taken on its error
+# screen `JHR-12935-13302` ("the version differs, please update"). Its gate,
+# linit.cc at 0x002e7530.., takes the same opcode 65 record and reads
+#
+#     +0x18 +0x20 +0x28 +0x30   FOUR u64s (the 2002 build has three)
+#     +0x38                     the version     lw v1, 56(s6)
+#     +0x3C u16, +0x3E u8
+#
+# and at 0x002e77fc compares the version with 0x20020603, a date again. We
+# answered 56 bytes with 0x20020227 at +0x30, so it read past the end of the
+# record and refused. The two clients send byte-identical requests (len 32,
+# sub 5), so the request cannot say which one is asking. One record serves
+# both: 0x40 long, the 2002 version where the 2002 build looks (+0x30, which
+# the 2004 build copies out as the low half of its unchecked fourth u64) and
+# the 2004 version where the 2004 build looks (+0x38, past everything the
+# 2002 build reads). POL_JAN_LNDV_DUAL=0 restores the 56-byte record.
+GM_VERSION_2004 = 0x20020603        # measured: the compare at 0x002e77fc
+LNDV_DUAL = os.environ.get("POL_JAN_LNDV_DUAL", "1") == "1"
 MjGETLNDV, MjGETLNDVACK = 64, 65
 
 LNDV_ENABLE = os.environ.get("POL_JAN_LNDV", "1") == "1"
@@ -458,6 +504,9 @@ def getlndv_ack(req, body=None):
                          _env_int("POL_JAN_LNDV_F30", GM_VERSION) & 0xFFFFFFFF)
         struct.pack_into("<H", tail, 0x1C, _env_int("POL_JAN_LNDV_F34") & 0xFFFF)
         tail[0x1E] = _env_int("POL_JAN_LNDV_F36") & 0xFF
+        if LNDV_DUAL:
+            tail += bytearray(8)                    # +0x38 .. +0x3F
+            struct.pack_into("<I", tail, 0x20, GM_VERSION_2004)
         body = bytes(tail)
     rec = janwire.pack(
         opcode=MjGETLNDVACK,
@@ -559,6 +608,123 @@ HEADER_LEN = 0x18
 # Player handles on the wire are 16 bytes: the banish handler copies two of them
 # with an 8-iteration two-bytes-at-a-time loop (0x002c64f0, 0x002c651c).
 NAME_LEN = 16
+
+
+# --- EmISEVENT / EmISEVENTACK: the 2004 build's Rankings opener ---------------
+#
+# Build 20040727_2 only (the 2002 build has no opcode 92/93). Every address is
+# in the plaintext 2004 module, base 0x00280000. Drop-in for janhourou.py, which
+# already has `os`, `struct`, `janwire` and `_env_int`.
+#
+# SENDER  0x003c5ec0(ctx = 0x004c46f0), called from RankingMain state 5
+#         (ranking_main.cc, 0x003271c8..cc):
+#     rec+0x08  u64  = [0x004c3e98]           (the standing GM peer id)
+#     rec+0x10  u16  = 40                     addiu v1,zero,40 @0x003c5ed0
+#     rec+0x12  u8   = 92                     @0x003c5ec4
+#     rec+0x13       NOT WRITTEN (stack junk; the capture shows 0)
+#     rec+0x14 = 4, +0x15 = -2, +0x16 = 3, +0x17 = 5
+#     rec+0x18  u64  = *ctx  (own PolID; the same u64 MjTGMPONG puts at +0x18,
+#                             0x00392f68)
+#     rec+0x20  u32  = 6     a CONSTANT: `addiu v0,zero,6` @0x003c5f08,
+#                            `sw v0,48(sp)` @0x003c5f18. Not a ranking kind and
+#                            not an event id -- nothing feeds it. INFERENCE: it
+#                            names the FIFO sub-code the client will wait on,
+#                            because the waiter below drains on exactly 6.
+#     rec+0x24  u32  not written (junk)
+#
+# GATE    0x003c5f30(E = RankingMain+0x6bac), polled from state 6 (0x003271f8):
+#     addiu a0, zero, 6          @0x003c5f48   <-- drains SUB-CODE 6
+#     jal   0x00392490           (the 2004 twin of 0x002c9d80; it buckets every
+#                                 inbound record by rec[0x17] through
+#                                 int32[8] @0x00485910 = [2,3,4,5,6,7,8,0],
+#                                 same table as 2002's 0x003e4520)
+#     blez  v0 -> return 0
+#     lb v1,18(s1); addiu v0,zero,93; bne -> return 0     (opcode only; src,
+#                                 dst, f13, f16, id8 are never looked at)
+#     lw  v0, 76(s1)  -> E+60    rec+0x4C u32   copied, no reader found
+#     lw  v0, 80(s1)  -> E+64    rec+0x50 u32   copied, no reader found
+#     memcpy(E+76, s1+84, 64)    rec+0x54 64 B  copied (event name? INFERENCE)
+#     lbu v1, 148(s1) -> E+72    rec+0x94 u8    THE FLAG
+#     return 1
+#   rec+0x18..0x4B are never read. Highest byte read is +0x94, so the record is
+#   0x98 long.
+#
+# THE FLAG: 0x00327ed0 (state 7) does `lw v0,27636(a0)` (= E+72) and enables
+#   the "Event" tab only when it is exactly 1 (`bne v0,a2` with a2=1), else
+#   disables it; 0x00327f20 is the same test, and the tab's help line is then
+#   0x0049f4c0 "no event is being held, the ranking cannot be viewed".
+#   So 0 = no event, 1 = event running. Any other value = no event.
+#
+# TIMEOUT: state 5 arms 0x0038d3f0(120) -- 0x0038d1d0 stores 120*1000, so it is
+#   120 SECONDS -- and state 6 raises dialog -13059 "the server is very busy"
+#   (0x0049ee30) when it expires, then leaves the screen. That 2-minute wait
+#   is the reported hang. A wrong-opcode record in FIFO 6 is eaten and the poll
+#   goes on; the gate can never return <0, so -13058 is unreachable.
+#
+#   POL_JAN_ISEVENT        0 disables the responder
+#   POL_JAN_ISEVENT_SUB    override rec[0x17]; default 6
+#   POL_JAN_ISEVENT_FLAG   the byte at +0x94; default 0 = no event
+EmISEVENT, EmISEVENTACK = 92, 93
+
+ISEVENT_ENABLE = os.environ.get("POL_JAN_ISEVENT", "1") == "1"
+ISEVENT_DRAIN_SUB = 6               # measured: `addiu a0, zero, 6` at 0x003c5f48
+ISEVENT_SUB = int(os.environ.get("POL_JAN_ISEVENT_SUB", str(ISEVENT_DRAIN_SUB)))
+ISEVENT_LEN = 0x98                  # measured: highest field read is +0x94
+#: The default answer is now the EVENT STORE's, not a constant: `janevent`
+#: says whether one is running, and its id and name ride along. The old
+#: environment override still wins, so a screen can be forced either way
+#: without touching the store.
+ISEVENT_FLAG = _env_int("POL_JAN_ISEVENT_FLAG", -1)
+try:
+    import janevent                                             # noqa: E402
+except ImportError:                                             # pragma: no cover
+    janevent = None
+
+
+def emisevent_ack(req, running=None, name=b"", f4c=0, f50=0):
+    """EmISEVENTACK, in the layout the gate at 0x003c5f30 reads.
+
+    MEASURED: the drain sub-code (6), the opcode (93), the four fields and
+    their offsets/widths, that +0x94 == 1 is the only "event running" value,
+    and that nothing else in the record is read.
+    INFERENCE: that +0x54 is the event's name and +0x4C/+0x50 its ids -- they
+    are stored and no reader was found, so zero is safe for "no event".
+    """
+    h = janwire.unpack(req)
+    if h["opcode"] != EmISEVENT or not ISEVENT_ENABLE:
+        return None
+    if running is None:
+        if ISEVENT_FLAG >= 0:
+            flag = ISEVENT_FLAG
+        elif janevent is not None:
+            cur = janevent.current()
+            flag = 1 if cur else 0
+            if cur:
+                # The id and the name ride the same record. NEITHER IS DRAWN in
+                # this build -- the gate copies them to RankingMain+27624/+27628
+                # and +27640 and no site reads any of the three back -- so they
+                # are sent because that is what the fields are for, not because
+                # anything has been seen to use them.
+                name = name or janevent.name_bytes()
+                f4c = f4c or int(cur.get("id") or 0)
+        else:
+            flag = 0
+    else:
+        flag = 1 if running else 0
+    rec = bytearray(janwire.pack(
+        opcode=EmISEVENTACK,
+        f13=h["f13"],                      # echoed verbatim, as the other acks do
+        src=janwire.DST_SERVER & 0xFF,
+        dst=janwire.DST_REPLY & 0xFF,
+        sub=ISEVENT_SUB,                   # = the sub-code the gate drains on
+        id8=h["payload"],                  # the asker's PolID (req +0x18)
+        length=ISEVENT_LEN,
+    )[:0x18])
+    rec += bytearray(ISEVENT_LEN - 0x18)   # +0x18 .. +0x97, all zero
+    struct.pack_into("<II", rec, 0x4C, f4c & 0xFFFFFFFF, f50 & 0xFFFFFFFF)
+    rec[0x54:0x54 + 64] = bytes(name)[:63].ljust(64, b"\0")   # memcpy of 64
+    rec[0x94] = flag & 0xFF                # 1 = event running, else none
+    return bytes(rec)
 
 
 def banish_notice(kicked=0, by=0, kicked_name=b"", by_name=b""):
@@ -1068,6 +1234,82 @@ def handle_line(line, peer="-", member_id=0):
     return queued + rest
 
 
+#: Set by jantitle to `_jan_peer_is_2004` -- "the client on THIS thread runs
+#: Janhourou 20040727_2". It is per-thread, so it can only be asked while
+#: answering that client, which is exactly when a record is turned into bytes.
+#: Unset (this module serving on its own), every client gets the 2002 shape.
+IS_2004 = None
+
+INGAME_2004 = os.environ.get("POL_JAN_INGAME_2004", "1") == "1"
+
+
+def _peer_is_2004(peer="-"):
+    if janmsgs2004 is None or not INGAME_2004 or IS_2004 is None:
+        return False
+    try:
+        return bool(IS_2004())
+    except Exception as e:                                      # never fatal
+        log("%s   build check raised: %s -- serving the 2002 shape" % (peer, e))
+        return False
+
+
+def _table_scores_names(member_id):
+    """`(scores, names)` for the table `member_id` sits at, for MjTSUMO's two
+    new 2004 fields. Both are drawn on the 2004 score plates, and neither
+    exists in the 2002 record, so they come from the table rather than from
+    the record being converted."""
+    scores, names = (0, 0, 0, 0), (b"", b"", b"", b"")
+    if GAMES is None:
+        return scores, names
+    try:
+        t = GAMES.by_member.get(int(member_id))
+        if t is None:
+            return scores, names
+        k = getattr(t, "kyoku", None)
+        if k is not None and getattr(k, "scores", None):
+            scores = tuple(int(v) for v in list(k.scores)[:4])
+        names = tuple((n or "").encode("cp932", "replace")[:15]
+                      for n in t._sashiuma_names())
+    except Exception:                                           # never fatal
+        pass
+    return scores, names
+
+
+def to_peer_build(recs, member_id=0, peer="-"):
+    """Every record in `recs`, in the shape the client being answered reads.
+
+    The 2002 build takes them as janmsgs built them. For the 2004 build,
+    MjHAIPAI loses four bytes, MjTSUMO gains the scores and the four seat
+    names, MjALLDATA gains the yakitori byte, and the four per-seat bytes
+    inside all of them flip meaning (2002 1 = human, 2004 non-zero = COM).
+    See janmsgs2004 for the addresses behind each move.
+    """
+    if not recs or not _peer_is_2004(peer):
+        return recs
+    out, touched = [], []
+    for r in recs:
+        try:
+            op = r[0x12]
+            if op == 36:                                        # MjTSUMO
+                scores, names = _table_scores_names(member_id)
+                new = janmsgs2004.tsumo_to_2004(r, scores=scores, names=names)
+            elif op == 20:                                      # GAMESETUP
+                _scores, names = _table_scores_names(member_id)
+                new = janmsgs2004.notice_gamesetup_to_2004(r, names=names)
+            else:
+                new = janmsgs2004.to_2004(r)
+            if new is not r and bytes(new) != bytes(r):
+                touched.append("%s %dB->%dB" % (opname(op), len(r), len(new)))
+            out.append(new)
+        except Exception as e:                                  # never fatal
+            log("%s   2004 conversion of %s raised: %s -- sending the 2002 "
+                "shape" % (peer, opname(r[0x12]), e))
+            out.append(r)
+    if touched:
+        log("%s   2004 layout: %s" % (peer, ", ".join(touched)))
+    return out
+
+
 def take_pending(member_id, peer="-", limit=None):
     """Encoded records waiting for this member, and clear them.
 
@@ -1091,7 +1333,9 @@ def take_pending(member_id, peer="-", limit=None):
         return out
     try:
         out += [janwire.encode(r)
-                for r in GAMES.pending_for_member(member_id, limit=limit)]
+                for r in to_peer_build(
+                    GAMES.pending_for_member(member_id, limit=limit),
+                    member_id=member_id, peer=peer)]
     except Exception as e:                                      # never fatal
         log("%s   pending drain raised: %s -- dropping nothing, retrying on "
             "the next line" % (peer, e))
@@ -1245,6 +1489,16 @@ def _handle_line(line, peer="-", member_id=0):
                "IM UD Check Failed -- the client will RESEND"))
         return janwire.encode(reply)
 
+    if h["opcode"] == EmISEVENT:
+        reply = emisevent_ack(rec)
+        if reply is None:
+            log("%s      EmISEVENT received but POL_JAN_ISEVENT=0 -- silent" % peer)
+            return None
+        log("%s   -> %s  [%dB, sub=%d, +0x94=%d -> %s]"
+            % (peer, describe(reply), len(reply), ISEVENT_SUB, reply[0x94],
+               "event tab ON" if reply[0x94] == 1 else "no event"))
+        return janwire.encode(reply)
+
     if h["opcode"] == MjGETLNDV:
         reply = getlndv_ack(rec)
         if reply is None:
@@ -1278,7 +1532,8 @@ def _handle_line(line, peer="-", member_id=0):
             return None
         for r in out:
             log("%s   -> %s" % (peer, describe(r)))
-        return [janwire.encode(r) for r in out]
+        return [janwire.encode(r) for r in
+                to_peer_build(out, member_id=member_id, peer=peer)]
 
     # --- reserve / cancel, against the SEAT STORE (2026-09-02) --------------
     # WARNING: THE TABLE ID IS `id8` (+0x08), NOT `payload` (+0x18). Corrected
@@ -1325,9 +1580,12 @@ def _handle_line(line, peer="-", member_id=0):
             # +0x42 the voice bank the table-info blob serves for the seat.
             voice = (struct.unpack_from("<H", rec, PLAYREQ_VOICE_OFF)[0]
                      if len(rec) >= PLAYREQ_VOICE_OFF + 2 else None)
+            face = (struct.unpack_from("<H", rec, PLAYREQ_FACE_OFF)[0]
+                    if len(rec) >= PLAYREQ_FACE_OFF + 2 else None)
             result, seat, mseat = janseats.reserve(
                 tid, member_id, display_name(member_id, peer),
-                polid=h["payload"], tag=h["f13"], voice=voice)
+                polid=h["payload"], tag=h["f13"], voice=voice,
+                                face=face)
             extra = ((mseat & 0xF) << 4) | (seat & 0xF)
         else:
             janseats.note_reserve_tag(member_id, h["f13"])
@@ -1524,9 +1782,12 @@ def _handle_line(line, peer="-", member_id=0):
             log("%s   -> %s  [inert: its flag is never read]" % (peer, describe(start)))
             log("%s   -> %s  [THE TRIGGER: bit 0x20 -> DAT_004460f2 -> "
                 "TableSelectMain returns 1]" % (peer, describe(setup)))
-            out.append(janwire.encode(notice))
-            out.append(janwire.encode(start))
-            out.append(janwire.encode(setup))
+            # The 2004 build reads four seat names out of the setup notice
+            # (janmsgs2004). The copies queued for the other seats below stay
+            # in 2002 shape and are converted per recipient as they drain.
+            out += [janwire.encode(_r) for _r in
+                    to_peer_build([notice, start, setup],
+                                  member_id=member_id, peer=peer)]
             # EVERY OTHER SEATED HUMAN NEEDS THIS EXACT TRIO, or their client
             # sits in the lobby watching a table it is seated at go "in play"
             # without it -- which is what was seen live as "being kicked".
@@ -2183,9 +2444,14 @@ def selftest():
         print("FAIL: LNDV ack src/dst = %d/%d, expected -3/-2"
               % (ah["src"], ah["dst"])); ok = False
     # the body the gate copies out: six fields, highest byte +0x36
-    if len(ack) != 0x38 or ah["length"] != 0x38:
-        print("FAIL: LNDV ack is %d bytes / length field %d, expected 0x38"
-              % (len(ack), ah["length"])); ok = False
+    want_len = 0x40 if LNDV_DUAL else 0x38
+    if len(ack) != want_len or ah["length"] != want_len:
+        print("FAIL: LNDV ack is %d bytes / length field %d, expected %#x"
+              % (len(ack), ah["length"], want_len)); ok = False
+    # The 2004 build's version, past everything the 2002 build reads.
+    if LNDV_DUAL and struct.unpack_from("<I", ack, 0x38)[0] != 0x20020603:
+        print("FAIL: +0x38 = %#x, but the 2004 client demands 0x20020603 "
+              "(0x002e77fc)" % struct.unpack_from("<I", ack, 0x38)[0]); ok = False
     probe = getlndv_ack(req, body=bytes(range(0x18, 0x38)))
     if struct.unpack_from("<Q", probe, 0x18)[0] != 0x1f1e1d1c1b1a1918:
         print("FAIL: body does not start at +0x18"); ok = False
@@ -2198,9 +2464,52 @@ def selftest():
     if struct.unpack_from("<I", ack, 0x30)[0] != 0x20020227:
         print("FAIL: +0x30 = %#x, but the client demands 0x20020227 (0x002ca8e0)"
               % struct.unpack_from("<I", ack, 0x30)[0]); ok = False
-    if len(janwire.encode(ack)) != 1 + janwire.enc_len(0x38):
-        print("FAIL: a 56-byte ack does not serialise to its own line length")
+    if len(janwire.encode(ack)) != 1 + janwire.enc_len(want_len):
+        print("FAIL: the ack does not serialise to its own line length")
         ok = False
+    # --- the EVENT flag, the one byte the client's Event tab is gated on ----
+    _ev = janwire.pack(id8=0x11, length=40, opcode=EmISEVENT, src=4,
+                       dst=janwire.DST_REPLY & 0xFF, f16=3, sub=5)[:0x18]
+    _ev += (0x2222).to_bytes(8, "little") + (6).to_bytes(4, "little") + bytes(4)
+    _keep = {k: os.environ.get(k) for k in
+             ("POL_JAN_EVENT_FORCE", "POL_JAN_EVENT_ID", "POL_JAN_EVENT_NAME",
+              "POL_JAN_ISEVENT_FLAG")}
+    try:
+        for _k in _keep:
+            os.environ.pop(_k, None)
+        os.environ["POL_JAN_EVENT_FORCE"] = "0"
+        _a = emisevent_ack(_ev)
+        if not (_a and len(_a) == 0x98 and _a[0x94] == 0 and _a[0x17] == 6):
+            print("FAIL: with no event the ack is 0x98 bytes, sub 6, flag 0")
+            ok = False
+        os.environ["POL_JAN_EVENT_FORCE"] = "1"
+        os.environ["POL_JAN_EVENT_ID"] = "9"
+        os.environ["POL_JAN_EVENT_NAME"] = "Cup"
+        _a = emisevent_ack(_ev)
+        if not (_a and _a[0x94] == 1
+                and struct.unpack_from("<I", _a, 0x4C)[0] == 9
+                and _a[0x54:0x57] == b"Cup" and _a[0x57] == 0):
+            print("FAIL: a running event sets the flag, the id at +0x4C and "
+                  "the NUL-terminated name at +0x54")
+            ok = False
+        # POL_JAN_ISEVENT_FLAG is read at import, like every other knob here,
+        # so the override is the module constant.
+        global ISEVENT_FLAG
+        _was = ISEVENT_FLAG
+        try:
+            ISEVENT_FLAG = 2
+            if emisevent_ack(_ev)[0x94] != 2:
+                print("FAIL: POL_JAN_ISEVENT_FLAG must still override the store")
+                ok = False
+        finally:
+            ISEVENT_FLAG = _was
+    finally:
+        for _k, _v in _keep.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
     # --- MjCHECKSAVEDATA, against the REAL captured request ------------------
     # The second opener message, captured 2026-08-12 once the LNDV handshake
     # completed. Same treatment: drive the responder with the client's own bytes.
@@ -2236,8 +2545,9 @@ def selftest():
 
     # 72 from the client's own name table + 0x48, the undocumented chat INFO
     # line sqFileAccess sends and receives.
-    if len(OPCODES) != 73 or opname(0x48) != "MjCHATINFO":
-        print("FAIL: opcode table is %d entries, expected 73 (0x48 = MjCHATINFO)"
+    # ... + 73..100, the 2004 build's additions.
+    if len(OPCODES) != 101 or opname(0x48) != "MjCHATINFO" or opname(93) != "EmISEVENTACK":
+        print("FAIL: opcode table is %d entries, expected 101 (0x48 = MjCHATINFO)"
               % len(OPCODES)); ok = False
     if ACK_FOR[MjMEMBERBANISH] != MjRESERVEACK:
         print("FAIL: a kick must be answered with MjRESERVEACK -- the kicker "
