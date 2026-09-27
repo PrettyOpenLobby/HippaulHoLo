@@ -1425,6 +1425,11 @@ class Janhourou(titles.Title):
     content_code = _JAN_CONTENT_ID
     fetch_pathlen = FETCH_PATHLEN
     resource_init = RESOURCE_INIT
+    #: The 2004 build keeps its profile and option settings in
+    #: `U/g/MJSOptionData`: it reads 144 bytes (`0x299bf0(..., 144)`) and
+    #: writes the same 144 back (`0x299ef0(..., 144, 0)`). The 2002 build has
+    #: no such file. An object of any other length is not this file.
+    resource_write_len = {"U/g/MJSOptionData": 144}
     polpro_spec_files = tuple(p for p in POLPRO_SPEC_CANDIDATES if os.path.isfile(p))
 
     def core_bound(self):
