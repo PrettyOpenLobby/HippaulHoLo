@@ -16,7 +16,7 @@
     selftest.py        The offline selftest (a whole hanchan with no client) and the command line.
 
 jangame.py (one directory up) is the entry point and the compatibility
-facade over these modules. Generated from the flat jangame.py by
-tools/split/split_jan_pkg.py and its map.
+facade over these modules. Generated once from the flat jangame.py in
+commit edb5a51, and edited directly since.
 """
 from . import table  # noqa: F401  (a split class's home loads before its parts)

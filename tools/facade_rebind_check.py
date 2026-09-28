@@ -6,7 +6,7 @@ reaches the code that runs.
     python tools/facade_rebind_check.py -v     # also list every rebinding found
 
 services/jangame.py and services/janhourou.py are facades over the jantable
-and janworld packages (tools/split/ generates both). Reads of
+and janworld packages. Reads of
 `jangame.<name>` go to the module that owns the name. That is not enough for
 the code that REBINDS a name to fake something or to turn a switch,
 

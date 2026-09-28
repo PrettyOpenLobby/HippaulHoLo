@@ -59,7 +59,8 @@ from janworld import (  # noqa: E402
     selftest as _selftest,
 )
 
-# Which janworld module owns each top-level name of the old janhourou.py.
+# Which janworld module owns each name that `janhourou.<name>` reaches. A new
+# top-level name that code outside the package uses through janhourou gets a line.
 _OWNERS = {
     'ACK_FOR': 'opcodes',
     'ACK_SUB': 'opcodes',
