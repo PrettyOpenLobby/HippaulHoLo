@@ -48,6 +48,9 @@ SUITES = [
     ("janlobby",      [PY, "janlobby.py", "--selftest"],       SERVICES, False),
     ("jan_watch",     [PY, "jan_watch_test.py"],               HERE,     False),
     ("jan_board",     [PY, "jan_board_test.py"],               HERE,     False),
+    # jangame.py / janhourou.py are facades over the jantable / janworld
+    # packages: every name the tree rebinds through them must reach its owner
+    ("facade_rebind", [PY, "facade_rebind_check.py"],          HERE,     False),
     # the opt-in switches (tests/): entry limits need only this tree; the
     # channel ids need the core's mgkey
     ("jan_reserve_limits", [PY, os.path.join(TESTS, "test_jan_reserve_limits.py")],
