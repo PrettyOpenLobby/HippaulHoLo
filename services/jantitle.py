@@ -301,7 +301,7 @@ def _jan_member_for_cid(cid):
     if accounts is None or not cid:
         return None, None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             row = accounts.handle_by_content_id(db, cid)
             if row is None:
