@@ -41,7 +41,7 @@ _CORE_NAMES = (
     "log", "NoPad", "PRESENCE", "ROOMS", "accounts", "polpro", "RESOURCE_DIR",
     "_game_notice_line", "_session_get", "_session_sid", "_member_content_id",
     "_member_display_name", "_live_rooms", "_title_zone", "_title_zone_lease",
-    "_content_profiles", "_peer_build", "CLIENT_BUILDS_PATH",
+    "_content_profiles", "_peer_build", "_client_builds",
 )
 
 #: Used when the core binds no `_peer_build` (an older core, or the selftests):
@@ -57,10 +57,6 @@ def _rebind():
             globals()[name] = None
     if globals().get("_peer_build") is None:
         globals()["_peer_build"] = _OWN_PEER_BUILD
-    if not globals().get("CLIENT_BUILDS_PATH"):
-        globals()["CLIENT_BUILDS_PATH"] = os.environ.get(
-            "POL_CLIENT_BUILDS",
-            os.path.join(os.environ.get("POL_LOG_DIR", "/logs"), "client-builds.json"))
 
 
 _rebind()
@@ -696,8 +692,9 @@ def _jan_peer_is_2004():
     The two builds send byte-identical openers and the 3:0 request carries no
     length, so the lobby cannot tell them apart from its own traffic. The patch
     server can: each title checks its own patch channel before it launches and
-    claims its exact build there, which the patch server notes per address in
-    the shared `client-builds.json` (the same hand-over the portal eras use).
+    claims its exact build there, which the patch server notes per address
+    (`titles.core._client_builds(address)`, the core's `clientbuild:<address>`
+    in Valkey; the same hand-over the portal eras use).
     The most recently seen `*/0003` claim for this address decides: any P2U
     (US Viewer) claim is the 2004 build, and a PS2 claim is judged by its
     version.
@@ -726,9 +723,8 @@ def _jan_peer_is_2004():
     if not ip:
         return bool(_JAN_BUILD_BY_MEMBER.get(_member)) if _member else False
     try:
-        with open(CLIENT_BUILDS_PATH, encoding="utf-8") as f:
-            entry = json.load(f).get(ip) or {}
-    except (OSError, ValueError):
+        entry = (_client_builds(ip) if _client_builds else None) or {}
+    except Exception:                                         # noqa: BLE001
         return False
     claims = [(v.get("seen", ""), k, v.get("version", ""))
               for k, v in entry.items() if k.endswith("/0003")]

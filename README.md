@@ -97,7 +97,8 @@ Two builds of the game exist: the 2002 one and the 2004 one (20040727_2,
 the build a US Viewer installs). They send identical openers, so the server
 tells them apart by the build the client claimed on its patch channel
 before launch, which the core's patch server records per address in
-`client-builds.json` (`POL_CLIENT_BUILDS`). The 2004 build is then served
+Valkey (`clientbuild:<address>`, see OpenLobby's docs/database.md). The
+2004 build is then served
 its own save, table-info, parlour and room-list layouts and its own
 in-game records (`services/janmsgs2004.py`). `POL_JAN_SAVE_2004=1` treats
 every client as the 2004 build, `0` as the 2002 one; the default `auto`
