@@ -5,7 +5,8 @@
 
 POL_JAN_RESERVE_LIMITS=1 turns it on (default off). Result 10 is the client's
 "Entry limits not met. Cannot reserve"; the +0x19 bitfield order (money,
-level, title) is Project Crystal Server's label, unverified. Temp dirs only.
+level, title) is Project Crystal Server's label, unverified. Temp dirs only,
+and the player records are rows of a throwaway database (tools/janpg.py).
 """
 import os
 import sys
@@ -13,6 +14,11 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
+sys.path.insert(0, os.path.join(HERE, "..", "tools"))
+import janpg  # noqa: E402
+
+if janpg.fresh_database() is None:
+    sys.exit(janpg.skip_or_fail("test_jan_reserve_limits"))
 
 tmp = tempfile.mkdtemp(prefix="janlimits-")
 os.environ["POL_DATA_DIR"] = os.path.join(tmp, "data")

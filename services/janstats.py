@@ -113,7 +113,14 @@ HISTORY_ROWS = 4
 #: a future ladder has something to compute against.
 HISTORY_KEEP = int(os.environ.get("POL_JAN_HISTORY_KEEP", "50"))
 
+#: WHERE A RECORD LIVES: the blob (str(member id), STATS_PATH) in the core's
+#: blob table (polcore.blobs), scoped to the member so that deleting the
+#: account deletes the record with it. It used to be the file
+#: `<POL_RESOURCE_DIR>/<member>.jan_stats.json`, and polcore.blobs.split_name
+#: of that name gives exactly this scope and path, so an import of an old
+#: resources/ directory lands every record where this module reads it.
 SUFFIX = ".jan_stats.json"
+STATS_PATH = SUFFIX[1:]
 
 #: `jangame.Table.BOT_ID_BASE`, repeated rather than imported: this module must
 #: stay importable on its own (responders.py picks it up without jangame), and a
@@ -235,23 +242,48 @@ def canonical_yaku(name):
     return YAKU_ALIASES.get(key) or YAKU_ALIASES.get(raw) or key or "unknown"
 
 
-def stats_dir():
-    """POL_RESOURCE_DIR first, exactly as `tetramaster._collection_dir` resolves
-    it and for the same reason -- deriving it from POL_DATA_DIR alone agrees only
-    until something sets the override."""
-    root = os.environ.get("POL_RESOURCE_DIR")
-    if not root:
-        root = os.path.join(os.environ.get("POL_DATA_DIR", "/data"), "resources")
-    return root
+def _blobs():
+    """polcore.blobs, found the way janstore finds polcore, with the core's
+    tables in place."""
+    import janstore
+    janstore.ensure_core_schema()
+    from polcore import blobs
+    return blobs
 
 
-def stats_file(member_id):
-    """Where a member's record is kept: beside the resources, because that
-    directory is already the bind-mounted per-member state we serve from, but
-    under its own suffix so it can never collide with a POL resource path."""
+def _errors():
+    """What reading or writing a record can raise when the database is not
+    there: the record then reads blank and a write reports False."""
+    try:
+        import janstore
+        return (ImportError, ValueError) + janstore.errors()
+    except ImportError:
+        return (ImportError, ValueError)
+
+
+def stats_name(member_id):
+    """The record's old file name, `<member>.jan_stats.json`, for the log and
+    `--show`. None for no member."""
     if member_id in (None, ""):
         return None
-    return os.path.join(stats_dir(), "%s%s" % (member_id, SUFFIX))
+    return "%s%s" % (member_id, SUFFIX)
+
+
+def stats_exists(member_id):
+    """True when this member has a stored record."""
+    if member_id in (None, ""):
+        return False
+    try:
+        return _blobs().exists(str(member_id), STATS_PATH)
+    except _errors():
+        return False
+
+
+def stats_delete(member_id):
+    """Remove this member's record. True when there was one."""
+    if member_id in (None, ""):
+        return False
+    return _blobs().delete(str(member_id), STATS_PATH)
 
 
 def blank(member_id=None):
@@ -333,13 +365,14 @@ def is_bot_id(member_id):
 def load(member_id):
     """This member's record, with every key present. Never raises."""
     rec = blank(member_id)
-    path = stats_file(member_id)
-    if not path:
+    if member_id in (None, ""):
         return rec
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
+        raw = _blobs().get(str(member_id), STATS_PATH)
+        if raw is None:
+            return rec
+        data = json.loads(raw.decode("utf-8"))
+    except _errors():
         return rec
     if not isinstance(data, dict):
         return rec
@@ -359,19 +392,16 @@ def load(member_id):
 
 
 def store(member_id, rec):
-    """Write atomically. Returns True on success; a failure is logged by the
-    caller, never raised into a hand in progress."""
-    path = stats_file(member_id)
-    if not path:
+    """Write the record in one statement, so a reader sees the old record or
+    the new one and never part of either. Returns True on success; a failure
+    is logged by the caller, never raised into a hand in progress."""
+    if member_id in (None, ""):
         return False
     try:
-        os.makedirs(stats_dir(), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(rec, f, indent=1, sort_keys=True)
-        os.replace(tmp, path)
+        data = json.dumps(rec, indent=1, sort_keys=True).encode("utf-8")
+        _blobs().put(str(member_id), STATS_PATH, data)
         return True
-    except OSError:
+    except _errors() + (TypeError,):
         return False
 
 
@@ -987,15 +1017,13 @@ def rank_category_of(path):
 
 
 def all_members():
-    """Every member with a record on disk."""
+    """Every member with a stored record."""
     out = []
     try:
-        for fn in os.listdir(stats_dir()):
-            if fn.endswith(SUFFIX):
-                mid = fn[:-len(SUFFIX)]
-                if mid.isdigit():
-                    out.append(int(mid))
-    except OSError:
+        for info in _blobs().listing(path=STATS_PATH):
+            if info.scope.isdigit():
+                out.append(int(info.scope))
+    except _errors():
         pass
     return sorted(out)
 
@@ -1096,7 +1124,6 @@ def rank_list_blob(category, limit=RANK_LIST_MAX, names=None, content_ids=None):
 # --- CLI / selftest ---------------------------------------------------------
 
 def selftest():
-    import tempfile
     ok = True
 
     def check(cond, msg):
@@ -1127,11 +1154,10 @@ def selftest():
     except ImportError:
         pass
 
-    old = os.environ.get("POL_RESOURCE_DIR")
-    tmp = tempfile.mkdtemp(prefix="janstats-")
-    os.environ["POL_RESOURCE_DIR"] = tmp
+    # The records are rows of the suite's own database (jan_run_all.py gives
+    # it one), so members 9 and 11 below start blank.
     old_scope = _SNAPSHOT_SCOPE[0]
-    _SNAPSHOT_SCOPE[0] = "selftest-%s:" % os.path.basename(tmp)
+    _SNAPSHOT_SCOPE[0] = "selftest-%d-%d:" % (os.getpid(), int(time.time() * 1000))
     try:
         ok &= check(load(9)["games_played"] == 0, "an unknown member reads blank")
         ok &= check(recent_places(9) == [NO_RANK] * 4,
@@ -1142,8 +1168,8 @@ def selftest():
         ok &= check(not is_bot_id(8), "a real member id is not a bot")
         ok &= check(record_game(BOT_ID_BASE | 3, 0, 40000, 50.0) is None,
                     "a bot's result is REFUSED -- it must never reach the file")
-        ok &= check(not os.path.exists(stats_file(BOT_ID_BASE | 3)),
-                    "and no file was created for it")
+        ok &= check(not stats_exists(BOT_ID_BASE | 3),
+                    "and no record was created for it")
         ok &= check(record_win(BOT_ID_BASE | 3, ["riichi"]) is None,
                     "a bot's win is refused too")
 
@@ -1187,7 +1213,7 @@ def selftest():
                     and (START_MONEY or max(0, money_of(legacy)) == 0),
                     "a pre-balance record replays to %r, not the old 0"
                     % money_balance(legacy))
-        os.remove(stats_file(11))       # the ranking checks below count records
+        stats_delete(11)                # the ranking checks below count records
         # A WIN YESTERDAY IS NOT "TODAY":
         # the windows are rolled when READ, not only when the next game lands.
         record_game(11, 0, 32700, 42.7, when=time.time() - 8 * 86400)
@@ -1197,7 +1223,7 @@ def selftest():
                     "a game 8 days old is not today's or this week's: %r"
                     % ({k: d11[k] for k in ("money_today", "money_weekly",
                                             "money_best")},))
-        os.remove(stats_file(11))
+        stats_delete(11)
         ok &= check(jan_for_points(45.5) == int(45.5 * RATE),
                     "jan_for_points scales by RATE")
         ok &= check(0 <= derive(rec)["rank"] <= RANK_MAX,
@@ -1366,10 +1392,9 @@ def selftest():
         ok &= check(note_name(9, "Fox") and load(9)["name"] == "Fox",
                     "note_name updates the stored name")
 
-        # A corrupt file must degrade to blank, not raise into a live hand.
-        with open(stats_file(9), "w", encoding="utf-8") as f_:
-            f_.write("{ not json")
-        ok &= check(load(9)["games_played"] == 0, "a corrupt file reads blank")
+        # A corrupt record must degrade to blank, not raise into a live hand.
+        _blobs().put("9", STATS_PATH, b"{ not json")
+        ok &= check(load(9)["games_played"] == 0, "a corrupt record reads blank")
 
         try:
             record_game(9, 7, 0, 0)
@@ -1377,10 +1402,6 @@ def selftest():
         except ValueError:
             pass
     finally:
-        if old is None:
-            os.environ.pop("POL_RESOURCE_DIR", None)
-        else:
-            os.environ["POL_RESOURCE_DIR"] = old
         try:
             import janstore
             janstore.db.execute("DELETE FROM jan_rank_snapshot WHERE left(category, %s) = %s",
@@ -1444,7 +1465,7 @@ def main():
     if a.show:
         rec = load(a.show)
         print(summary(a.show))
-        print("  file    %s" % stats_file(a.show))
+        print("  record  %s" % stats_name(a.show))
         print("  derived %r" % (derive(rec),))
         print("  recent  %r  (NO_RANK = %d)" % (recent_places(rec), NO_RANK))
         for h in rec["history"][:HISTORY_ROWS]:

@@ -83,11 +83,12 @@ SUITES = [
 
 
 #: suites that get a fresh PostgreSQL database of their own (see the docstring):
-#: the ones that keep Janhourou's durable state (the event record, the rank
-#: snapshot, the board's bookkeeping), and the core's suites whose accounts
-#: live in PostgreSQL too
-NEEDS_DB = {"janevent", "janstats", "jan_board", "jan_store",
-            "core_resource", "core_content_profile"}
+#: the ones that keep Janhourou's durable state (the player records, the event
+#: record, the rank snapshot, the board's bookkeeping), and the core's suites
+#: whose accounts and resources live in PostgreSQL too
+NEEDS_DB = {"jangame", "janevent", "janstats", "jansave", "jan_board",
+            "jan_reserve_limits", "jan_store", "core_resource",
+            "core_content_profile"}
 
 
 def _fresh_database():

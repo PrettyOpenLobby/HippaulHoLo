@@ -102,6 +102,7 @@ except ImportError:
 
 _schema_lock = threading.Lock()
 _schema_ready = set()
+_core_ready = set()
 
 
 def errors():
@@ -136,10 +137,30 @@ def ensure_schema(log=None):
         _schema_ready.add(key)
 
 
+def ensure_core_schema(log=None):
+    """Apply the core's own pending migrations, once per process and database.
+
+    Janhourou's player records are rows of the core's `blob` table
+    (polcore.blobs), which the core's services create when they start. A
+    process that can run first (the parlour listener, a board or a test)
+    applies them itself; the advisory lock in `polcore.db.migrate` keeps two
+    from doing it at once. Raises like `ensure_schema`.
+    """
+    key = db.database_url()
+    if key in _core_ready:
+        return
+    with _schema_lock:
+        if key in _core_ready:
+            return
+        db.migrate(log=log or (lambda msg: print("[janstore] %s" % msg, flush=True)))
+        _core_ready.add(key)
+
+
 def forget_schema():
     """Drop the once-per-process memo (tests that switch databases)."""
     with _schema_lock:
         _schema_ready.clear()
+        _core_ready.clear()
 
 
 def migrate_at_start(who):

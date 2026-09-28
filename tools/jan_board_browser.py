@@ -39,13 +39,15 @@ def main(argv=None):
     names = ["Seiryu", "Byakko", "Sennin", "Square", "Schildt", "Genbu",
              "Tensai", "tabax", "Majin", "Suzaku", "Fox", "Perry"]
     janpg.pol_accounts({i + 1: [(n, True, None)] for i, n in enumerate(names)})
+    import janstats
+    from polcore import blobs
     for i in range(len(names)):
-        with open(os.path.join(res, "%d.jan_stats.json" % (i + 1)), "w") as fh:
-            json.dump({"games_played": 3 + i, "places": [i % 3, 1, 1, 1],
-                       "result_x10": 900 - 130 * i, "result_x10_week": 50 * i,
-                       "history": [{"place": i % 4, "result_x10": 100 - 37 * i,
-                                    "score": 25000, "t": int(time.time()) - 600 * i,
-                                    "table": 1}]}, fh)
+        rec = {"games_played": 3 + i, "places": [i % 3, 1, 1, 1],
+               "result_x10": 900 - 130 * i, "result_x10_week": 50 * i,
+               "history": [{"place": i % 4, "result_x10": 100 - 37 * i,
+                            "score": 25000, "t": int(time.time()) - 600 * i,
+                            "table": 1}]}
+        blobs.put(str(i + 1), janstats.STATS_PATH, json.dumps(rec).encode("utf-8"))
     # a watchable live table, for the watching page (written as jangame does)
     os.environ["POL_DATA_DIR"] = tmp
     os.environ["POL_JAN_WATCH_KEY"] = "jan:test:%s:tables-live" % os.path.basename(tmp)

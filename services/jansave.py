@@ -714,22 +714,15 @@ def selftest():
                 "decode reports every measured offset")
 
     if janstats is not None:
-        import tempfile
-        old = os.environ.get("POL_RESOURCE_DIR")
-        os.environ["POL_RESOURCE_DIR"] = tempfile.mkdtemp(prefix="jansave-")
-        try:
-            b0, _, _ = build_for_member(4242)
-            ok &= check(b0[EXISTING_PLAYER] == 0,
-                        "a member with no record is served the BLANK branch")
-            janstats.record_game(4242, 0, 40000, 50.0)
-            b1, _, _ = build_for_member(4242)
-            ok &= check(b1[EXISTING_PLAYER] == 1,
-                        "and the identity branch once they have played")
-        finally:
-            if old is None:
-                os.environ.pop("POL_RESOURCE_DIR", None)
-            else:
-                os.environ["POL_RESOURCE_DIR"] = old
+        # member 4242's record is a row of this suite's own database
+        # (jan_run_all.py gives it one)
+        b0, _, _ = build_for_member(4242)
+        ok &= check(b0[EXISTING_PLAYER] == 0,
+                    "a member with no record is served the BLANK branch")
+        janstats.record_game(4242, 0, 40000, 50.0)
+        b1, _, _ = build_for_member(4242)
+        ok &= check(b1[EXISTING_PLAYER] == 1,
+                    "and the identity branch once they have played")
 
     print("jansave selftest: %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
