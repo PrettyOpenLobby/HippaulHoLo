@@ -19,6 +19,11 @@ COPY services/ /app/
 COPY config/polpro.json /app/polpro.json
 COPY tools/ /app/tools/
 
+# services/ lands on top of the core's modules, so refuse an image in which
+# a stray copy has replaced the core's live_sessions.py (.dockerignore keeps
+# one out of the build context)
+RUN python -c "import sys, live_sessions; hasattr(live_sessions, 'marker_key') or sys.exit('live_sessions.py is not the one from the OpenLobby image')"
+
 # the parlour listener's port; the title itself has none of its own
 EXPOSE 51272
 

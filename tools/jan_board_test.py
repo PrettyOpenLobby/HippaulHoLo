@@ -369,6 +369,8 @@ def main():
     res = os.path.join(tmp, "resources")
     os.makedirs(res)
     os.environ["POL_RESOURCE_DIR"] = res
+    # the live-session marker stays in this process's own store
+    os.environ.pop("POL_VALKEY_URL", None)
     janpg.pol_accounts({1: [("Fox", True, None)],
                         2: [("Perry", True, None), ("OldName", False, None)],
                         3: [("Maria", True, None)]})
@@ -446,14 +448,17 @@ def main():
           [(g["name"], g["place"], g["result"], g["t"]) for g in rg]
           == [("Perry", 0, 46.9, 2000), ("Fox", 1, 2.9, 1500), ("Perry", 3, -20.0, 1000)], rg)
     os.environ["POL_DATA_DIR"] = tmp
-    marker = os.path.join(tmp, boardjan.LIVE_MARKER)
+    import live_sessions
     check("no marker = no claim either way (None, not 0)", boardjan.live_games() is None)
-    with open(marker, "w") as fh:
-        json.dump({"count": 2, "stamp": time.time()}, fh)
+    live_sessions.write_marker(boardjan.LIVE_MARKER, 2)
     check("a fresh marker = its count of games in progress", boardjan.live_games() == 2)
-    with open(marker, "w") as fh:
-        json.dump({"count": 2, "stamp": time.time() - boardjan.LIVE_GRACE_S - 5}, fh)
-    check("...a stale one (past pol-git-sync's grace) = 0", boardjan.live_games() == 0)
+    check("...a stale one (past pol-git-sync's grace) = 0",
+          boardjan.live_games(time.time() + boardjan.LIVE_GRACE_S + 5) == 0)
+    # the snapshot below must see a stale marker: an old record in place of
+    # the fresh one
+    from polcore import kv
+    kv.set(live_sessions.marker_key(boardjan.LIVE_MARKER),
+           json.dumps({"count": 2, "stamp": time.time() - boardjan.LIVE_GRACE_S - 5}))
     check("...and the snapshot carries it", boardjan.snapshot()["live_games"] == 0)
 
     print("names when the account database is unreachable")
