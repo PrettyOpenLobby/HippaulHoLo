@@ -5,19 +5,18 @@ polboards service it runs in.
     python tools/jan_board_test.py
 
 Pins: the five categories in janstats' own order and values; names read from
-accounts.db READ-ONLY (the file is byte-identical afterwards); the up/down/New
+the account database READ-ONLY (its rows are unchanged afterwards); the up/down/New
 glyph from the previous rank; that the board NEVER rewrites the rank snapshot
 the client's glyph compares against; and the page server's routes.
 
-The rank snapshot is a PostgreSQL table (jan_rank_snapshot), so this suite runs
-on a throwaway database (janpg.py): the runner's, or its own. Without a server
+The rank snapshot is a PostgreSQL table (jan_rank_snapshot), and the accounts
+live in PostgreSQL too, so this suite runs on a throwaway database (janpg.py):
+the runner's, or its own. Without a server
 it reports SKIP, or FAIL under POL_TEST_REQUIRE_DB=1.
 """
-import hashlib
 import json
 import os
 import socket
-import sqlite3
 import sys
 import tempfile
 import time
@@ -39,11 +38,6 @@ def check(label, cond, detail=""):
           flush=True)
     if not cond:
         raise AssertionError(label)
-
-
-def _sha(p):
-    with open(p, "rb") as fh:
-        return hashlib.sha256(fh.read()).hexdigest()
 
 
 class FakeNet:
@@ -375,15 +369,9 @@ def main():
     res = os.path.join(tmp, "resources")
     os.makedirs(res)
     os.environ["POL_RESOURCE_DIR"] = res
-    db = os.path.join(tmp, "accounts.db")
-    os.environ["POL_ACCOUNTS_DB"] = db
-    c = sqlite3.connect(db)
-    c.execute("CREATE TABLE handle (id INTEGER PRIMARY KEY, member_id INTEGER, "
-              "handle_name TEXT, is_primary INTEGER)")
-    c.executemany("INSERT INTO handle (member_id, handle_name, is_primary) VALUES (?,?,?)",
-                  [(1, "Lex", 1), (2, "Quinn", 1), (2, "OldName", 0), (3, "Elena", 1)])
-    c.commit()
-    c.close()
+    janpg.pol_accounts({1: [("Lex", True, None)],
+                        2: [("Quinn", True, None), ("OldName", False, None)],
+                        3: [("Elena", True, None)]})
     # three players: 1 strong, 2 middling, 3 never played (not ranked)
     recs = {1: {"games_played": 4, "places": [3, 1, 0, 0], "result_x10": 800},
             2: {"games_played": 6, "places": [1, 2, 2, 1], "result_x10": -150},
@@ -396,7 +384,7 @@ def main():
     import polboards
 
     print("the data")
-    db_before = _sha(db)
+    db_before = janpg.accounts_fingerprint()
     s = boardjan.snapshot()
     check("five categories, janstats' own order",
           [c["name"] for c in s["categories"]] == list(janstats.RANK_CATEGORIES))
@@ -414,8 +402,8 @@ def main():
           rating[0]["games"] == 4 and rating[0]["level"] >= 1)
     check("with no previous list, every row is 'new'",
           all(r["move"] == "new" and r["prev"] is None for r in rating))
-    check("accounts.db is byte-identical after reading names (read-only URI)",
-          _sha(db) == db_before)
+    check("the account tables are unchanged after reading names",
+          janpg.accounts_fingerprint() == db_before)
     check("the board NEVER writes the rank snapshot the client's glyph uses",
           snapshot_rows() == [])
 
@@ -464,15 +452,19 @@ def main():
     check("...a stale one (past pol-git-sync's grace) = 0", boardjan.live_games() == 0)
     check("...and the snapshot carries it", boardjan.snapshot()["live_games"] == 0)
 
-    print("names when accounts.db is missing")
-    os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "nope.db")
+    print("names when the account database is unreachable")
+
+    def unreachable():
+        raise ConnectionError("the account database is down")
+    real_conn = boardjan._accounts_conn
+    boardjan._accounts_conn = unreachable
     boardjan._NAMES.update(t=0.0, map={})
-    rows = boardjan.snapshot()["categories"][0]["rows"]
+    try:
+        rows = boardjan.snapshot()["categories"][0]["rows"]
+    finally:
+        boardjan._accounts_conn = real_conn
     check("rows still come back, just without names",
           len(rows) == 2 and all(r["name"] == "" for r in rows))
-    check("...and no database file is created by trying",
-          not os.path.exists(os.path.join(tmp, "nope.db")))
-    os.environ["POL_ACCOUNTS_DB"] = db
     boardjan._NAMES.update(t=0.0, map={})
 
     print("the game's text rules")

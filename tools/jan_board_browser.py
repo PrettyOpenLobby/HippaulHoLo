@@ -6,13 +6,13 @@ Chrome (render-web-ui-before-shipping), over a temporary 12-player board.
 
 Fails on any JavaScript error, on art or a ROM web font that never loads, on
 text that runs into its neighbour, or on a control that does not do what the
-game's does. Needs Chrome/Edge and websocket-client (see fe_panel_browser.py).
+game's does. Needs Chrome/Edge and websocket-client (see fe_panel_browser.py),
+and a throwaway PostgreSQL database for the players' names (janpg.py).
 """
 import argparse
 import copy
 import json
 import os
-import sqlite3
 import sys
 import tempfile
 import time
@@ -22,6 +22,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, os.pardir, "services"))
 
 from fe_panel_browser import Browser, free_port   # noqa: E402
+import janpg                                      # noqa: E402
 
 
 def main(argv=None):
@@ -29,21 +30,15 @@ def main(argv=None):
     ap.add_argument("--shots", default=tempfile.mkdtemp(prefix="jan-board-shots-"))
     o = ap.parse_args(argv)
     os.makedirs(o.shots, exist_ok=True)
+    if janpg.fresh_database() is None:
+        return janpg.skip_or_fail("jan_board_browser")
     tmp = tempfile.mkdtemp(prefix="jan-board-browser-")
     res = os.path.join(tmp, "resources")
     os.makedirs(res)
     os.environ["POL_RESOURCE_DIR"] = res
-    db = os.path.join(tmp, "accounts.db")
-    os.environ["POL_ACCOUNTS_DB"] = db
     names = ["Seiryu", "Byakko", "Sennin", "Square", "Brandle", "Genbu",
              "Hikari", "pelix", "Kodai", "Suzaku", "Lex", "Quinn"]
-    c = sqlite3.connect(db)
-    c.execute("CREATE TABLE handle (id INTEGER PRIMARY KEY, member_id INTEGER, "
-              "handle_name TEXT, is_primary INTEGER)")
-    c.executemany("INSERT INTO handle (member_id, handle_name, is_primary) VALUES (?,?,1)",
-                  [(i + 1, n) for i, n in enumerate(names)])
-    c.commit()
-    c.close()
+    janpg.pol_accounts({i + 1: [(n, True, None)] for i, n in enumerate(names)})
     for i in range(len(names)):
         with open(os.path.join(res, "%d.jan_stats.json" % (i + 1)), "w") as fh:
             json.dump({"games_played": 3 + i, "places": [i % 3, 1, 1, 1],
@@ -418,4 +413,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

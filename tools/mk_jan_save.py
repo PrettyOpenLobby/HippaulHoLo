@@ -51,7 +51,7 @@ def build(existing=True):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("member", help="member.id from accounts.db (PS2Tester = 8)")
+    ap.add_argument("member", help="member.id from the account database (PS2Tester = 8)")
     ap.add_argument("--blank", action="store_true",
                     help="write the zero-branch blob instead (the control)")
     ap.add_argument("--record", action="store_true",

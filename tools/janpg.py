@@ -121,6 +121,44 @@ def valkey_url():
             time.sleep(0.2)
 
 
+def pol_accounts(spec):
+    """Members 1..max(spec) in the fresh database, made with OpenLobby's own
+    accounts functions. `spec` is {member id: [(handle name, primary,
+    {handle_profile field: value}), ...]}; a member id with no entry gets no
+    handle. Member ids come from the database's own sequence, so this needs
+    an empty database, and says so if the ids come out different."""
+    import accounts
+    # a sealing key in the environment, so add_member never writes a key file
+    os.environ.setdefault("POL_LOGIN_PW_KEY", "jan-selftest")
+    conn = accounts.connect()
+    try:
+        for want in range(1, max(spec) + 1):
+            polid = "JANTEST%02d" % want
+            accounts.create_polid(conn, polid, "Passw0rdTest")
+            mid = accounts.add_member(conn, polid, polid, "Passw0rdTest")
+            if mid != want:
+                raise RuntimeError("fixture member %d came out as %d -- the "
+                                   "database was not empty" % (want, mid))
+            for name, primary, profile in spec.get(want, ()):
+                hid = accounts.set_handle(conn, mid, name, primary=primary)
+                if profile:
+                    accounts.set_handle_profile(conn, hid, profile)
+    finally:
+        conn.close()
+
+
+def accounts_fingerprint():
+    """Every row of the tables the board reads, for a read-only check."""
+    import accounts
+    conn = accounts.connect()
+    try:
+        return [list(map(tuple, conn.execute(
+                    "SELECT * FROM %s ORDER BY 1, 2" % t).fetchall()))
+                for t in ("member", "handle", "handle_profile")]
+    finally:
+        conn.close()
+
+
 def skip_or_fail(suite, what="PostgreSQL server"):
     """What a suite returns when there is no server: 0 (SKIP), or 1 when
     POL_TEST_REQUIRE_DB=1."""
