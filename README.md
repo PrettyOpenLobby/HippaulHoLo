@@ -51,6 +51,32 @@ or set `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME` in your environment. To take
 the title out again, run the core's own `docker compose up -d` from its
 checkout.
 
+### Moving from an earlier release
+
+Earlier releases kept the event record, the ranking's previous order and the
+board's Discord bookkeeping as files. They now live in OpenLobby's PostgreSQL
+(`jan_event`, `jan_rank_snapshot`, `jan_board_state`), and the files are
+imported once, after OpenLobby's own import (its docs/database.md, "Moving
+an existing /data") and before the title starts. From this directory:
+
+```
+DC="docker compose --project-directory ../openlobby -f ../openlobby/docker-compose.yml -f docker-compose.yml"
+$DC run --rm --no-deps --entrypoint python jan janstore.py import event /data/resources/janevent.json
+$DC run --rm --no-deps --entrypoint python jan janstore.py import rank_snapshot /data/resources/jan-rank-snapshot.json
+$DC run --rm --no-deps -v crystalholo_jan-board-state:/state:ro --entrypoint python jan janstore.py import board_state /state
+```
+
+The last reads the board's old state volume (`crystalholo_jan-board-state`,
+from when this was a compose project of its own; `docker volume ls` shows the
+name) and matters only where the board posted to Discord; without it the
+board posts its messages afresh. Each command only reads its source, runs in
+one transaction, prints what it imported and each entry it could not map,
+and refuses a table that already holds rows unless given `--merge`, which
+adds only the keys the table lacks. `--dry-run` prints the same report and
+writes nothing, and a second run changes nothing. A file that is not there
+has nothing to import: an install that never ran an event has no
+`janevent.json`.
+
 ### With Tetra Master
 
 Both titles run in the same processes. With CrystalMaster brought up once

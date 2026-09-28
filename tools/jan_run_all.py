@@ -70,6 +70,8 @@ SUITES = [
     ("jan_delta_e2e", [PY, "jan_delta_e2e.py"],                HERE,     True),
     # --- the state outside the process: PostgreSQL tables and Valkey keys ----
     ("jan_store",     [PY, "jan_store_test.py"],               HERE,     True),
+    # the files an earlier release kept, imported into those tables
+    ("jan_import",    [PY, "jan_import_test.py"],              HERE,     True),
     # the core's own suites, with this title loaded
     ("core_resource", [PY, os.path.join(CORE_TOOLS, "resource_test.py")],
                       CORE_TOOLS, True),
@@ -87,7 +89,7 @@ SUITES = [
 #: record, the rank snapshot, the board's bookkeeping), and the core's suites
 #: whose accounts and resources live in PostgreSQL too
 NEEDS_DB = {"jangame", "janevent", "janstats", "jansave", "jan_board",
-            "jan_reserve_limits", "jan_store", "core_resource",
+            "jan_reserve_limits", "jan_store", "jan_import", "core_resource",
             "core_content_profile"}
 
 
