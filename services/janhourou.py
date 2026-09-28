@@ -519,7 +519,50 @@ ACK_SUB = 5
 #   POL_JAN_LNDV_F30   the GM version -- MUST be 0x20020227 or the game quits
 #   POL_JAN_LNDV_F34 / _F36   the u16 and u8 (unchecked here, default 0)
 #   POL_JAN_LNDV_BODY  raw hex for the whole tail from +0x18, overrides the six
+#
+# WHAT THE FIELDS ARE. Project Crystal Server's GetLnDvAck names
+# the 2004 layout: +0x18 Profile channel id, +0x20 Rank channel id, +0x28 Lobby
+# channel id, +0x30 LobbyEvent channel id, +0x38 u32 version, +0x3C u16 lobby
+# volume, +0x3E u8 lobby domain -- and fills them with its own server ids
+# ("pp0002", "pp0004", "pp0001", "pp0001") each moved into Janhourou's id space
+# (`MjKey` = XOR with mgkey's K("MJS")), version 0x20020603, volume 0, domain 3.
+# The 2002 layout is the same list without LobbyEvent: +0x18 Profile, +0x20
+# Rank, +0x28 Lobby, +0x30 version, +0x34 volume, +0x36 domain. One piece of
+# that is ours, off the 2002 decompile (sqMgInitMg, objstrings.c:2436, 2460):
+# the +0x28 u64 is where the client ADDRESSES its very next message, the
+# MjCHECKSAVEDATA check (`uStack_3f8 = *in_t1_lo` -> record +0x08) -- a lobby
+# server, as Crystal's name says. Profile/Rank/volume/domain are Crystal's
+# names only.
+#
+#   POL_JAN_LNDV_CHANNELS=1   (default OFF) serve Crystal-style channel ids and
+#                             domain 3 instead of zeros. It moves the
+#                             MjCHECKSAVEDATA destination off id 0, the id the
+#                             save check is answered at today; check that the
+#                             save check is still answered before turning it on.
+#                             The explicit POL_JAN_LNDV_F18/_F20/_F28/_F34/_F36
+#                             still win. In the dual record the 2002 version must
+#                             stay at +0x30, so the 2004 build's LobbyEvent id
+#                             cannot be served there; with the knob on only its
+#                             volume/domain (+0x3C/+0x3E) are filled.
 GM_VERSION = 0x20020227             # measured: the compare at 0x002ca8e0
+
+#: Crystal's server POL ids for the channels (MjConstants.cs), in POL-ID space.
+LNDV_POLID_LOBBY = 0x00000113405D1B2C       # "pp0001", Crystal's balancer
+LNDV_POLID_PROFILE = 0x0000011341108228     # "pp0002"
+LNDV_POLID_RANK = 0x000000DC8475C22A        # "pp0004"
+LNDV_LOBBY_DOMAIN = 3                       # Crystal's LobbyDomain
+
+
+def _lndv_channels_on():
+    return os.environ.get("POL_JAN_LNDV_CHANNELS", "0") == "1"
+
+
+def lndv_channel_ids():
+    """(profile, rank, lobby) as served with POL_JAN_LNDV_CHANNELS=1: each
+    POL id XOR K("MJS"), Crystal's `MjKey`."""
+    import mgkey
+    return tuple(mgkey.game_id(x, "MJS") for x in
+                 (LNDV_POLID_PROFILE, LNDV_POLID_RANK, LNDV_POLID_LOBBY))
 
 # THE 2004 CLIENT READS A DIFFERENT LAYOUT AND DEMANDS A DIFFERENT VERSION.
 # Measured 2026-09-21 on build 20040727_2 (the Janhourou the Dirge of Cerberus
@@ -572,18 +615,26 @@ def getlndv_ack(req, body=None):
     if body is None:
         body = LNDV_BODY
     if not body:
+        chans = _lndv_channels_on()
+        profile, rank, lobby = lndv_channel_ids() if chans else (0, 0, 0)
+        domain = LNDV_LOBBY_DOMAIN if chans else 0
         tail = bytearray(LNDV_LEN - 0x18)          # +0x18 .. +0x37
-        struct.pack_into("<QQQ", tail, 0x00,
-                         _env_int("POL_JAN_LNDV_F18") & 0xFFFFFFFFFFFFFFFF,
-                         _env_int("POL_JAN_LNDV_F20") & 0xFFFFFFFFFFFFFFFF,
-                         _env_int("POL_JAN_LNDV_F28") & 0xFFFFFFFFFFFFFFFF)
-        struct.pack_into("<I", tail, 0x18,
+        struct.pack_into("<QQQ", tail, 0x00,       # profile, rank, lobby
+                         _env_int("POL_JAN_LNDV_F18", profile) & 0xFFFFFFFFFFFFFFFF,
+                         _env_int("POL_JAN_LNDV_F20", rank) & 0xFFFFFFFFFFFFFFFF,
+                         _env_int("POL_JAN_LNDV_F28", lobby) & 0xFFFFFFFFFFFFFFFF)
+        struct.pack_into("<I", tail, 0x18,         # the 2002 GM version
                          _env_int("POL_JAN_LNDV_F30", GM_VERSION) & 0xFFFFFFFF)
-        struct.pack_into("<H", tail, 0x1C, _env_int("POL_JAN_LNDV_F34") & 0xFFFF)
-        tail[0x1E] = _env_int("POL_JAN_LNDV_F36") & 0xFF
+        struct.pack_into("<H", tail, 0x1C,         # 2002 lobby volume
+                         _env_int("POL_JAN_LNDV_F34") & 0xFFFF)
+        tail[0x1E] = _env_int("POL_JAN_LNDV_F36", domain) & 0xFF   # 2002 domain
         if LNDV_DUAL:
+            # +0x30..+0x37 above is the 2004 build's LobbyEvent id (unchecked);
+            # +0x38 its version, +0x3C its volume, +0x3E its domain.
             tail += bytearray(8)                    # +0x38 .. +0x3F
             struct.pack_into("<I", tail, 0x20, GM_VERSION_2004)
+            if chans:
+                tail[0x26] = domain
         body = bytes(tail)
     rec = janwire.pack(
         opcode=MjGETLNDVACK,
@@ -1629,6 +1680,8 @@ def _handle_line(line, peer="-", member_id=0):
     # Live proof (member 6 reserving table 1, 2026-09-03T22:35:34):
     #   id8=0000000000000001            <- our authored #MJS0T001
     #   payload=5b01e2bb73b3b60b        <- the <PD> PolID of LaptopTest2
+    # (a <PD> PolID is the member's nick fold XOR mgkey's K("MJS"), the same
+    # per-title id key Tetra Master uses with "TM0")
     # The old code keyed the store off `payload`, so every client wrote its own
     # per-player record and ptl_blob's seat_count(1..4) always read 0: the row
     # never showed an occupant, "View table members" stayed greyed (its gate is
