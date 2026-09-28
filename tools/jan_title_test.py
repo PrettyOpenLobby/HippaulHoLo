@@ -25,7 +25,6 @@ _TD = tempfile.mkdtemp(prefix="jantitle-")
 os.environ.setdefault("POL_LOG_DIR", os.path.join(_TD, "logs"))
 os.environ["POL_RESOURCE_DIR"] = os.path.join(_TD, "res")
 os.environ["POL_DATA_DIR"] = _TD
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(_TD, "accounts.db")
 os.environ["POL_JAN_SEATS_KEY"] = "jan:test:%s:seats" % os.path.basename(_TD)
 os.environ["POL_SESSION_SHARE"] = "0"
 os.makedirs(os.environ["POL_RESOURCE_DIR"], exist_ok=True)
