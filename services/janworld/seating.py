@@ -1,7 +1,6 @@
 """Who sits where: the room a member is in, the seats the lobby store holds,
 and the names drawn.
 """
-import os
 from .deps import accounts, janlobby, janseats
 from . import notices, wirelog
 
@@ -50,8 +49,7 @@ def display_name(member_id, nick=None):
     name = ""
     if accounts is not None:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 row = accounts.primary_handle_row(db, mid)
                 name = str(row["handle_name"]) if row else ""
