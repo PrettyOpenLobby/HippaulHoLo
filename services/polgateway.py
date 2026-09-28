@@ -508,17 +508,18 @@ class Presence:
 # --------------------------------------------------------------------------- #
 # the player count a board shows
 # --------------------------------------------------------------------------- #
-#: THE COUNT IS ALREADY BEING PUBLISHED. services/live_sessions.py has written
-#: `data/<service>-sessions-live.json` = {"count", "stamp"} every 10 seconds
-#: since the deploy scripts needed to know whether recreating a container would
-#: cut someone's session. feworld and fmo already call it. That marker is
-#: exactly "how many players are in this game right now", it is atomic, and the
-#: boards already mount /data read-only -- so presence reads it rather than
+#: THE COUNT IS ALREADY BEING PUBLISHED. The core's live_sessions.py keeps
+#: one marker per service, `live:<service>` = {"count", "stamp"} in Valkey,
+#: rewritten every 10 seconds so a deploy can tell whether recreating a
+#: container would cut someone's session. That marker is exactly "how many
+#: players are in this game right now", so presence reads it rather than
 #: inventing a second mechanism for the same number.
 #:
 #: A game that does not spawn a thread per session publishes with
-#: publish_count() instead; either way the file and its schema are the same.
-DATA_DIR = os.environ.get("POL_DATA_DIR", "/data")
+#: publish_count() instead; either way the key and its schema are the same.
+#:
+#: live_sessions.py is the core's module: the image is built FROM the
+#: OpenLobby image, and a checkout finds it beside polcore.
 
 #: A count older than this is not a count, it is the last thing a dead service
 #: said. The marker is rewritten every 10 s, so this is generous. Past it we
@@ -526,54 +527,50 @@ DATA_DIR = os.environ.get("POL_DATA_DIR", "/data")
 PRESENCE_STALE = float(os.environ.get("POL_PRESENCE_STALE", "180"))
 
 
-#: games whose marker predates the live_sessions contract and is named
-#: differently. Tetra Master's has the IDENTICAL {count, stamp} schema, so
-#: presence reads it rather than asking tetramaster.py to publish a second
-#: copy of the same number. Note it counts MATCHES, not players, which is why
-#: a board says what its count is called.
-MARKER_NAMES = {"tm": "tm-matches-live.json"}
+#: game -> the live-state key its count is published under, for a game whose
+#: service is not simply called after it. Tetra Master's count comes from its
+#: match marker, `live:tm`, which the deploy gate reads too. Note it counts
+#: MATCHES, not players, which is why a board says what its count is called.
+MARKER_NAMES = {"tm": "live:tm"}
 
 
-def marker_path(game, directory=None):
-    """Where `game` publishes its live count. Kept identical to
-    live_sessions.marker_path -- the same file, by contract."""
-    name = MARKER_NAMES.get(game, "%s-sessions-live.json" % game)
-    return os.path.join(directory or DATA_DIR, name)
+def _live_sessions():
+    import live_sessions
+    return live_sessions
 
 
-def publish_count(game, count, extra=None, directory=None):
+def marker_key(game):
+    """The live-state key `game` publishes its count under."""
+    return MARKER_NAMES.get(game) or _live_sessions().marker_key(game)
+
+
+def _service(game):
+    ls = _live_sessions()
+    key = marker_key(game)
+    return key[len(ls.KEY_PREFIX):] if key.startswith(ls.KEY_PREFIX) else key
+
+
+def publish_count(game, count, extra=None):
     """Say how many players a game has, for a service that cannot just count
-    its own per-session threads. Atomic, because a board may read at any
-    moment, and best-effort: a status is never worth an exception."""
+    its own per-session threads. Best-effort: a status is never worth an
+    exception."""
     try:
-        path = marker_path(game, directory)
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        rec = {"count": int(count), "stamp": time.time()}
-        if extra:
-            rec.update(extra)
-        tmp = "%s.tmp.%d" % (path, os.getpid())
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(rec, fh)
-        os.replace(tmp, path)
+        _live_sessions().write_marker(_service(game), int(count), extra)
         return True
-    except (OSError, ValueError, TypeError):
+    except (ImportError, ValueError, TypeError):
         return False
 
 
-def read_count(game, directory=None, stale=None):
+def read_count(game, stale=None):
     """How many players `game` has, or None if nobody has said recently."""
     stale = PRESENCE_STALE if stale is None else float(stale)
     try:
-        with open(marker_path(game, directory), encoding="utf-8") as fh:
-            rec = json.load(fh) or {}
-        if stale > 0 and time.time() - float(rec.get("stamp") or 0) > stale:
-            return None
-        return max(0, int(rec.get("count") or 0))
-    except (OSError, ValueError, TypeError):
+        return _live_sessions().read_count(_service(game), stale)
+    except (ImportError, ValueError, TypeError):
         return None
 
 
-def count_text(game, directory=None, stale=None, idle="", n=None,
+def count_text(game, stale=None, idle="", n=None,
                one="player online", many="players online"):
     """The activity text for a count: "12 players online", "1 player online",
     and `idle` (default: nothing) when there is nobody or nobody has said.
@@ -583,7 +580,7 @@ def count_text(game, directory=None, stale=None, idle="", n=None,
     board that works its own number out passes it as `n`.
     """
     if n is None:
-        n = read_count(game, directory, stale)
+        n = read_count(game, stale)
     # ZERO IS A NUMBER AND GETS SHOWN. This used to fall back to `idle` (i.e.
     # no status at all), which on a server that is usually empty made every
     # bot look broken rather than idle -- there is no way to tell "the bot is
@@ -603,7 +600,6 @@ def main(argv=None):
     ap.add_argument("--text", default="", help="the activity text to hold")
     ap.add_argument("--game", default="", help="instead of --text, show this "
                                                "game's published player count")
-    ap.add_argument("--presence-dir", default=None, help="where --game reads")
     ap.add_argument("--seconds", type=float, default=0.0,
                     help="stop after S seconds (0 = run until killed)")
     args = ap.parse_args(argv)
@@ -611,7 +607,7 @@ def main(argv=None):
         raise SystemExit("polgateway: --token (or POL_GATEWAY_TOKEN) is required")
     fn = None
     if args.game:
-        fn = lambda: count_text(args.game, args.presence_dir)      # noqa: E731
+        fn = lambda: count_text(args.game)      # noqa: E731
     pres = Presence(args.name, args.token, status_fn=fn, text=args.text).start()
     try:
         if args.seconds:
