@@ -1528,4 +1528,9 @@ class Janhourou(titles.Title):
 
 
 def register():
+    # Janhourou's own tables (janstore, services/jan_migrations/), applied
+    # when the core loads the title, before the first game line needs them
+    if os.environ.get("POL_DATABASE_URL", "").strip():
+        import janstore
+        janstore.migrate_at_start("jantitle")
     return titles.register(Janhourou())

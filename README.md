@@ -135,15 +135,17 @@ join one (it has no entry screen), so an event is a window in which what
 players win is counted:
 
 ```
-python services/janevent.py --open "Weekend Cup" --days 3
-python services/janevent.py --show
-python services/janevent.py --close
+docker compose ... exec authsess python janevent.py --open "Weekend Cup" --days 3
+docker compose ... exec authsess python janevent.py --show
+docker compose ... exec authsess python janevent.py --close
 ```
 
-The record lives in the resource directory (`POL_JAN_EVENT` overrides the
-path). `janevent.py --rotate`, run hourly by cron or a timer, opens and
-closes events from the shared event calendar (`eventcal`, when the core
-provides it); `POL_JAN_EVENT_AUTO=0` turns that off.
+The record lives in OpenLobby's PostgreSQL database (the `jan_event`
+table), so the commands run wherever `POL_DATABASE_URL` reaches it; inside
+the stack's `authsess` container it already does. `janevent.py --rotate`, run
+hourly by cron or a timer the same way, opens and closes events from the
+shared event calendar (`eventcal`, when the core provides it);
+`POL_JAN_EVENT_AUTO=0` turns that off.
 
 ## The live board (optional)
 

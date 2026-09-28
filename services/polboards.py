@@ -20,7 +20,11 @@ with its own --tm-auction-discord-webhook and its own message id. A feed
 whose board has discord_<feed>_messages (plural) posts a SET of messages
 (DiscordSet: one per list, one per listing), not one. This file
 owns the sockets and the webhooks. The ONE thing it writes is each webhook's
-message id ($POL_BOARDS_STATE_DIR, /state on prod), never game data.
+message id and where each feed posts, never game data: with a database
+configured (POL_DATABASE_URL, as in the compose stack) that is the
+`jan_board_state` table, one row per former state file, through janstore; with
+none, the files in $POL_BOARDS_STATE_DIR as before (a checkout without a
+database). An explicit --<feed>-discord-state path is always a file.
 
     python polboards.py --jan-port 8791 --fmo-port 8792 --tm-port 8793 [--bind 0.0.0.0] [--jan-discord-webhook URL]
 """
@@ -35,6 +39,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+
+import janstore
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -269,6 +275,49 @@ def _brief(data):
     return json.dumps(data)[:160]
 
 
+#: Discord bookkeeping in the database: state_path() hands out "db:<name>"
+#: for it, and the readers and writers below go to this table instead of a file.
+STATE_TABLE = "jan_board_state"
+_DB_PREFIX = "db:"
+
+
+def _state_db():
+    """True when the bookkeeping goes to the database (POL_DATABASE_URL set)."""
+    return bool(os.environ.get("POL_DATABASE_URL", "").strip())
+
+
+def _state_errors():
+    return (OSError, ValueError, AttributeError, TypeError) + janstore.errors()
+
+
+def state_read(path):
+    """The JSON document at `path`: a "db:<name>" row of STATE_TABLE, or a
+    file. {} when there is none. Raises what reading it raises."""
+    if isinstance(path, str) and path.startswith(_DB_PREFIX):
+        janstore.ensure_schema()
+        row = janstore.db.query_one(
+            "SELECT data FROM jan_board_state WHERE name = %s", (path[len(_DB_PREFIX):],))
+        return dict(row["data"]) if row and isinstance(row["data"], dict) else {}
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh) or {}
+
+
+def state_write(path, data):
+    """Replace the document at `path` (see state_read). Raises on failure."""
+    if isinstance(path, str) and path.startswith(_DB_PREFIX):
+        janstore.ensure_schema()
+        janstore.db.execute(
+            "INSERT INTO jan_board_state (name, data) VALUES (%s, %s::jsonb)"
+            " ON CONFLICT (name) DO UPDATE SET data = EXCLUDED.data, updated_at = now()",
+            (path[len(_DB_PREFIX):], janstore.jsonb(data)))
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, path)
+
+
 class Discord:
     """One board's webhook. Every network error is logged and survived; the
     URL is a secret and is never printed."""
@@ -300,14 +349,13 @@ class Discord:
 
     def _load(self):
         try:
-            with open(self.path, encoding="utf-8") as fh:
-                d = json.load(fh) or {}
+            d = state_read(self.path)
             # the id belongs to ONE webhook; a new webhook starts fresh
             if d.get("hook") == self._hook():
                 self.events = [{"id": str(e["id"]), "t": float(e.get("t") or 0)}
                                for e in (d.get("events") or []) if e.get("id")]
                 return str(d.get("message_id") or "") or None
-        except (OSError, ValueError, AttributeError, TypeError):
+        except _state_errors():
             pass
         return None
 
@@ -315,13 +363,9 @@ class Discord:
         if not self.path or self.path == os.devnull:
             return
         try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            tmp = "%s.tmp.%d" % (self.path, os.getpid())
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump({"hook": self._hook(), "message_id": self.msg_id,
-                           "events": self.events}, fh)
-            os.replace(tmp, self.path)
-        except OSError as e:
+            state_write(self.path, {"hook": self._hook(), "message_id": self.msg_id,
+                                    "events": self.events})
+        except _state_errors() as e:
             self._log("could not save the message id (%s) -- a restart will "
                       "post a second board" % e)
 
@@ -525,8 +569,7 @@ class DiscordSet(Discord):
 
     def _load(self):
         try:
-            with open(self.path, encoding="utf-8") as fh:
-                d = json.load(fh) or {}
+            d = state_read(self.path)
             if d.get("hook") == self._hook():
                 self.events = [{"id": str(e["id"]), "t": float(e.get("t") or 0)}
                                for e in (d.get("events") or []) if e.get("id")]
@@ -539,7 +582,7 @@ class DiscordSet(Discord):
                                                 "t": float(m.get("t") or 0),
                                                 "ended": m.get("ended")}
                 self.done = set(str(s) for s in (d.get("done") or []))
-        except (OSError, ValueError, AttributeError, TypeError):
+        except _state_errors():
             pass
         return None
 
@@ -547,13 +590,9 @@ class DiscordSet(Discord):
         if not self.path or self.path == os.devnull:
             return
         try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            tmp = "%s.tmp.%d" % (self.path, os.getpid())
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump({"hook": self._hook(), "messages": self.msgs,
-                           "done": sorted(self.done), "events": self.events}, fh)
-            os.replace(tmp, self.path)
-        except OSError as e:
+            state_write(self.path, {"hook": self._hook(), "messages": self.msgs,
+                                    "done": sorted(self.done), "events": self.events})
+        except _state_errors() as e:
             self._log("could not save the message ids (%s) -- a restart will "
                       "post the set again" % e)
 
@@ -791,7 +830,8 @@ def bot_channels():
     """{"chosen": {feed key: {guild id: channel id}},
         "posted": {feed key: {guild id: channel id}}}: where a feed was told
     to post (/<board>board <feed>), and where it last did, per server. Kept
-    in the state dir, the service's one writable place.
+    in the database (the "discord_channels" row of STATE_TABLE), or with no
+    database in the state dir.
 
     Per guild so that a bot invited to a second server adds a board there
     instead of moving the first server's board. Every feed runs a post per
@@ -802,11 +842,9 @@ def bot_channels():
     a running board where it is across the upgrade, and the first
     /<board>board adopts it (see _note_channel).
     """
-    d = _state_dir()
     try:
-        with open(os.path.join(d, "discord_channels.json"), encoding="utf-8") as fh:
-            data = json.load(fh) or {}
-    except (OSError, ValueError, TypeError):
+        data = state_read(_channels_path()) if _channels_path() else {}
+    except _state_errors():
         data = {}
     out = {}
     for which in ("chosen", "posted"):
@@ -822,19 +860,23 @@ def bot_channels():
     return out
 
 
-def _write_channels(data):
+def _channels_path():
+    """Where bot_channels lives: the "discord_channels" row with a database,
+    else the state dir's discord_channels.json, else nowhere ("")."""
+    if _state_db():
+        return _DB_PREFIX + "discord_channels"
     d = _state_dir()
-    if not d:
+    return os.path.join(d, "discord_channels.json") if d else ""
+
+
+def _write_channels(data):
+    path = _channels_path()
+    if not path:
         return False
     try:
-        os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, "discord_channels.json")
-        tmp = "%s.tmp.%d" % (path, os.getpid())
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-        os.replace(tmp, path)
+        state_write(path, data)
         return True
-    except OSError:
+    except _state_errors():
         return False
 
 
@@ -1111,12 +1153,15 @@ def run_bot_feed(board, args, key, feed, hook, token, opener=None, rounds=None,
 
 
 def state_path(args, name):
-    """--<name>-discord-state, else $POL_BOARDS_STATE_DIR (/state on prod, the
-    one writable mount) / <name>_discord.json. With neither, nothing is kept
-    and a restart posts a second board -- said so at start."""
+    """--<name>-discord-state, else the "<name>_discord" row of STATE_TABLE
+    when a database is configured, else $POL_BOARDS_STATE_DIR (/state) /
+    <name>_discord.json. With none of them, nothing is kept and a restart
+    posts a second board -- said so at start."""
     p = getattr(args, "%s_discord_state" % name, "") or ""
     if p:
         return p
+    if _state_db():
+        return "%s%s_discord" % (_DB_PREFIX, name)
     d = os.environ.get("POL_BOARDS_STATE_DIR") or ("/state" if os.path.isdir("/state") else "")
     return os.path.join(d, "%s_discord.json" % name) if d else os.devnull
 
@@ -1279,6 +1324,8 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     started = []
+    if _state_db():
+        janstore.migrate_at_start("polboards")
     for name, modname in BOARDS.items():
         port = int(getattr(args, "%s_port" % name) or 0)
         if not port:
