@@ -18,18 +18,16 @@ TWO THINGS THIS MODULE MUST NEVER DO, both of which the obvious call does:
     rewrites janstats.RANK_SNAPSHOT, which is what the client's up/down/New
     glyph compares against. A page polled every few seconds would reset every
     player's movement to "no change". Always `remember=False`.
-  * open accounts.db through `accounts.connect()`. That applies the schema --
-    a WRITE lock even when every statement is a no-op -- and sets the journal
-    mode on the file the login services are writing. Names are read through a
-    plain read-only SQLite URI instead, the one query `primary_handle_row`
-    runs. (The known WAL hazard is a Windows bind mount; prod is Linux.)
+  * write to the account database. Names and portraits are read through
+    OpenLobby's accounts functions (accounts.connect(), the stack's
+    PostgreSQL): `primary_handle` and `primary_handle_row` with its
+    `get_handle_profile`, and nothing else.
 """
 import datetime
 import hashlib
 import io
 import json
 import os
-import sqlite3
 import struct
 import threading
 import time
@@ -61,11 +59,12 @@ _RENDER_LOCK = threading.Lock()
 _WARNED = set()
 
 
-def accounts_path():
-    """POL_ACCOUNTS_DB, else /data/accounts.db -- where prod's login/authsess
-    keep it (their env says so). accounts.DEFAULT_DB's /config/accounts.db
-    does not exist there: the first deploy's names were all blank."""
-    return os.environ.get("POL_ACCOUNTS_DB", "/data/accounts.db")
+def _accounts_conn():
+    """(accounts module, a connection) to the stack's account database
+    (POL_DATABASE_URL). Raises when OpenLobby's accounts module is not on the
+    path or the database cannot be reached; the callers catch that."""
+    import accounts
+    return accounts, accounts.connect()
 
 
 def member_names(members, ttl=60.0):
@@ -83,21 +82,17 @@ def member_names(members, ttl=60.0):
             return dict(_NAMES["map"])
     out = {}
     try:
-        conn = sqlite3.connect("file:%s?mode=ro" % accounts_path(), uri=True,
-                               timeout=5)
+        acc, conn = _accounts_conn()
         try:
             for m in members:
-                row = conn.execute(
-                    "SELECT handle_name FROM handle WHERE member_id = ?"
-                    " ORDER BY is_primary DESC, id ASC LIMIT 1", (m,)).fetchone()
-                out[m] = str(row[0]) if row and row[0] else ""
+                out[m] = str(acc.primary_handle(conn, m) or "")
         finally:
             conn.close()
-    except sqlite3.Error as e:
+    except Exception as e:                      # noqa: BLE001 -- see the docstring
         if "names" not in _WARNED:
             _WARNED.add("names")
-            print("[boardjan] cannot read names from %s (%s) -- rows show "
-                  "without them" % (accounts_path(), e), flush=True)
+            print("[boardjan] cannot read names from the account database (%r) "
+                  "-- rows show without them" % (e,), flush=True)
         # None, not {m: ""}: janstats reads "" as a deleted account and drops
         # the row, so a DB error would empty the whole ranking
         return None
@@ -422,7 +417,8 @@ _FACE_LOCK = threading.Lock()
 
 
 def face_ids(members, ttl=60.0):
-    """{member id: z_ficon} through a read-only URI, cached `ttl` s; 0 = none picked."""
+    """{member id: z_ficon} from the primary handle's profile, cached `ttl` s;
+    0 = none picked."""
     members = [int(m) for m in members if str(m).isdigit()]
     now = time.time()
     with _FACE_LOCK:
@@ -433,17 +429,15 @@ def face_ids(members, ttl=60.0):
     if not want:
         return out
     try:
-        conn = sqlite3.connect("file:%s?mode=ro" % accounts_path(), uri=True, timeout=5)
+        acc, conn = _accounts_conn()
         try:
             for m in want:
-                row = conn.execute(
-                    "SELECT val_int FROM handle_profile WHERE field_id = ? AND handle_id ="
-                    " (SELECT id FROM handle WHERE member_id = ?"
-                    "  ORDER BY is_primary DESC, id ASC LIMIT 1)", (PORTRAIT_FIELD, m)).fetchone()
-                out[m] = int(row[0]) if row and row[0] else 0
+                h = acc.primary_handle_row(conn, m)
+                fid = acc.get_handle_profile(conn, h["id"]).get(PORTRAIT_FIELD)                     if h is not None else None
+                out[m] = fid if isinstance(fid, int) and fid else 0
         finally:
             conn.close()
-    except sqlite3.Error:
+    except Exception:                           # noqa: BLE001 -- portraits are optional
         for m in want:
             out.setdefault(m, 0)
     with _FACE_LOCK:
