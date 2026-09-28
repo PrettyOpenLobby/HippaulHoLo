@@ -169,6 +169,8 @@ runs the offline suite (the rules engine, the game manager, the records,
 the lobby lists, the switches under `tests/`, the seam with the core); it
 needs the OpenLobby checkout beside this one (or `OPENLOBBY_SERVICES`
 pointing at its `services/` directory).
+CONTRIBUTING.md says where things are in the tree and what a pull request
+needs.
 
 ## What is not included, and why
 
