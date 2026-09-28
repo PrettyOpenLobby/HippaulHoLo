@@ -20,6 +20,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, os.pardir))
 SERVICES = os.path.join(ROOT, "services")
+TESTS = os.path.join(ROOT, "tests")
 sys.path.insert(0, HERE)
 import jan_testenv                                                 # noqa: E402
 
@@ -47,6 +48,12 @@ SUITES = [
     ("janlobby",      [PY, "janlobby.py", "--selftest"],       SERVICES, False),
     ("jan_watch",     [PY, "jan_watch_test.py"],               HERE,     False),
     ("jan_board",     [PY, "jan_board_test.py"],               HERE,     False),
+    # the opt-in switches (tests/): entry limits need only this tree; the
+    # channel ids need the core's mgkey
+    ("jan_reserve_limits", [PY, os.path.join(TESTS, "test_jan_reserve_limits.py")],
+                      TESTS,    False),
+    ("jan_lndv_channels", [PY, os.path.join(TESTS, "test_jan_lndv_channels.py")],
+                      TESTS,    True),
     # --- the seam with the core -------------------------------------------
     ("jan_title",     [PY, "jan_title_test.py"],               HERE,     True),
     ("jan_delta_e2e", [PY, "jan_delta_e2e.py"],                HERE,     True),

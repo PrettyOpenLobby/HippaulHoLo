@@ -48,6 +48,11 @@ services:
       POL_JAN_PORT: "51272"
       POL_LOG_DIR: /logs
       POL_DATA_DIR: /data
+      # opt-in behaviour (README.md, "Optional switches"); empty = off
+      POL_JAN_RESERVE_LIMITS: "${POL_JAN_RESERVE_LIMITS:-}"
+      POL_JAN_LIMIT_MONEY_MIN: "${POL_JAN_LIMIT_MONEY_MIN:-}"
+      POL_JAN_LIMIT_LEVEL_MIN: "${POL_JAN_LIMIT_LEVEL_MIN:-}"
+      POL_JAN_LNDV_CHANNELS: "${POL_JAN_LNDV_CHANNELS:-}"
       PYTHONUNBUFFERED: "1"
     ports:
       - "51272:51272"

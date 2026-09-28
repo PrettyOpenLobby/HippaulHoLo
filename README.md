@@ -103,6 +103,27 @@ in-game records (`services/janmsgs2004.py`). `POL_JAN_SAVE_2004=1` treats
 every client as the 2004 build, `0` as the 2002 one; the default `auto`
 decides per client.
 
+## Optional switches
+
+Both are off by default and are set in `.env` (the compose file passes
+them to the `jan` listener); an empty value is the default.
+
+- `POL_JAN_RESERVE_LIMITS=1` enforces the entry limits a table's master
+  sets in the second rules dialog (Money limit, Level limit, Title 1..5
+  limit). A player who misses one is answered with the client's own "Entry
+  limits not met" instead of a seat. Each limit is stored by the client as
+  on or off, so what "Money limit" and "Level limit" demand are the
+  server's numbers: `POL_JAN_LIMIT_MONEY_MIN` (JAN balance, default 1) and
+  `POL_JAN_LIMIT_LEVEL_MIN` (level, default 1). A title limit demands that
+  the player holds that title. The table's seated members are never
+  refused.
+- `POL_JAN_LNDV_CHANNELS=1` fills the profile, rank and lobby channel ids
+  and the lobby domain of the MjGETLNDVACK record with the values Project
+  Crystal Server serves, instead of zeros. The explicit `POL_JAN_LNDV_F18`
+  / `_F20` / `_F28` / `_F34` / `_F36` fields still win. It needs a core
+  image that carries `mgkey.py`; leave it off unless you are comparing the
+  two servers.
+
 ## The weekly rankings
 
 The five ranking lists (Jan Rating, Titles, Overall Gamble, Weekly Gamble,
@@ -145,9 +166,9 @@ python tools/jan_run_all.py
 ```
 
 runs the offline suite (the rules engine, the game manager, the records,
-the lobby lists, the seam with the core); it needs the OpenLobby checkout
-beside this one (or `OPENLOBBY_SERVICES` pointing at its `services/`
-directory).
+the lobby lists, the switches under `tests/`, the seam with the core); it
+needs the OpenLobby checkout beside this one (or `OPENLOBBY_SERVICES`
+pointing at its `services/` directory).
 
 ## What is not included, and why
 
