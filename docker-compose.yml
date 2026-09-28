@@ -13,6 +13,13 @@
 # the live board. Everything else - ports, volumes, the other services - is
 # OpenLobby's.
 #
+# Janhourou keeps its durable data (the event record, the ranking's previous
+# order, the board's Discord bookkeeping) in OpenLobby's PostgreSQL and its
+# live state (the seats, each table's rules, the tables being watched) in
+# OpenLobby's Valkey. login and authsess get both from the core's own service
+# entries; the two services added here name them and wait for them the same
+# way. Each applies Janhourou's migrations (services/jan_migrations/) at start.
+#
 # Running Tetra Master as well: build this image on top of CrystalMaster's
 # (OPENLOBBY_IMAGE=crystalmaster:latest, POL_TITLES=tmtitle,jantitle) and
 # stack the three compose files; see README.md, "With Tetra Master".
@@ -48,6 +55,8 @@ services:
       POL_JAN_PORT: "51272"
       POL_LOG_DIR: /logs
       POL_DATA_DIR: /data
+      POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
+      POL_VALKEY_URL: "valkey://valkey:6379/0"
       # opt-in behaviour (README.md, "Optional switches"); empty = off
       POL_JAN_RESERVE_LIMITS: "${POL_JAN_RESERVE_LIMITS:-}"
       POL_JAN_LIMIT_MONEY_MIN: "${POL_JAN_LIMIT_MONEY_MIN:-}"
@@ -60,6 +69,11 @@ services:
       - ../openlobby/config:/config:ro
       - pol-data:/data
       - pol-logs:/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
 
   # Optional: the live web board (the five ranking lists, a watch page for
   # tables that allow it). Standings are a text page out of the box; the
@@ -76,7 +90,9 @@ services:
     environment:
       POL_ACCOUNTS_DB: /data/accounts.db
       POL_DATA_DIR: /data
-      POL_BOARDS_STATE_DIR: /state
+      # the Discord bookkeeping goes to the jan_board_state table
+      POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
+      POL_VALKEY_URL: "valkey://valkey:6379/0"
       POL_BOARDS_JAN_URL: "${POL_BOARDS_JAN_URL:-}"
       POL_BOARDS_JAN_DISCORD_WEBHOOK: "${POL_BOARDS_JAN_DISCORD_WEBHOOK:-}"
       POL_BOARDS_JAN_LIVE_DISCORD_WEBHOOK: "${POL_BOARDS_JAN_LIVE_DISCORD_WEBHOOK:-}"
@@ -88,7 +104,8 @@ services:
       - "127.0.0.1:8791:8791"
     volumes:
       - pol-data:/data:ro
-      - jan-board-state:/state
-
-volumes:
-  jan-board-state:
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
