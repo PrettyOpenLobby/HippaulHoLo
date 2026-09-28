@@ -121,9 +121,20 @@ def old_files(base):
         json.dump(d, fh)
     with open(os.path.join(state, "README.txt"), "w") as fh:
         fh.write("not state")
-    with open(os.path.join(state, "tm_discord.json"), "w") as fh:
+    with open(os.path.join(state, "jan_old_discord.json"), "w") as fh:
         fh.write("not json")
+    # the other boards' files: the old state directory was one for every board
+    for other in OTHER_BOARDS:
+        with open(os.path.join(state, other), "w") as fh:
+            json.dump({"message_id": "1"}, fh)
+    # a bot's own file for this board, per guild
+    with open(os.path.join(state, "jan_live_bot_99_discord.json"), "w") as fh:
+        json.dump({"message_id": "556"}, fh)
     return os.path.join(res, "janevent.json"), snap, state
+
+
+OTHER_BOARDS = ("tm_discord.json", "tm_auction_bot_99_discord.json",
+                "fmo_discord.json", "ffxi_conquest_discord.json")
 
 
 def digest(root):
@@ -211,15 +222,19 @@ def _main(base):
     code, out = run("board_state", state)
     check("exit 0", code == 0, out)
     rows = {r["name"]: r["data"] for r in db.query("SELECT name, data FROM jan_board_state")}
-    check("a row per state file, named as the board names it",
-          sorted(rows) == ["discord_channels", "jan_discord", "jan_live_discord"], sorted(rows))
+    check("a row per state file of this board, named as the board names it",
+          sorted(rows) == ["discord_channels", "jan_discord", "jan_live_bot_99_discord",
+                           "jan_live_discord"], sorted(rows))
     check("the message ids", rows.get("jan_discord", {}).get("message_id") == "555"
           and rows.get("jan_live_discord", {}).get("message_id") == "555", rows)
     check("the channels, per guild", rows.get("discord_channels")
           == {"chosen": {"jan": {"99": "4242"}}, "posted": {"jan_live": {"99": "4243"}}},
           rows.get("discord_channels"))
     check("a file that is not board state, and one that is not JSON, are skipped",
-          "skipped README.txt" in out and "skipped tm_discord.json" in out, out)
+          "skipped README.txt" in out and "skipped jan_old_discord.json" in out, out)
+    check("the other boards' files are skipped as theirs",
+          all("skipped %s: another board's state" % n in out for n in OTHER_BOARDS),
+          out)
     import polboards
     check("the board reads the imported message id",
           polboards.Discord("jan", "https://discord.com/api/webhooks/1/x",

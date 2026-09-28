@@ -41,8 +41,9 @@ Every live key starts with `jan:` (below polcore.kv's own POL_KV_PREFIX).
 `import` moves what an earlier release kept in files into the tables:
 `event` reads janevent.json into the 'current' row of jan_event,
 `rank_snapshot` reads jan-rank-snapshot.json into jan_rank_snapshot (one row
-per category), and `board_state` reads the web board's <name>_discord.json
-and discord_channels.json (a file, or every such file in a directory) into
+per category), and `board_state` reads the web board's jan_*_discord.json
+and discord_channels.json (a file, or every such file in a directory; the
+other boards' files in a shared state directory are skipped) into
 jan_board_state, one row per file named as the board names it. The file is
 only read. The import runs in one transaction and refuses a table that
 already holds rows (exit 2) unless --merge is given, which adds only the keys
@@ -372,6 +373,17 @@ def read_old_rank_snapshot(path):
                  rows, jsonb=("data",), compare_skip=("updated_at",))], skipped
 
 
+#: The start of every Discord state file the Janhourou board wrote. polboards
+#: names a feed's file <feed key>_discord.json and the bot's <feed
+#: key>_bot_<guild>_discord.json, and board "jan"'s feed keys are "jan" and
+#: "jan_<feed>", so each of its files starts with "jan_": jan_discord.json,
+#: jan_live_discord.json, and the bot's jan_bot_<guild>_discord.json and
+#: jan_live_bot_<guild>_discord.json. The old state directory was shared by
+#: every board, so a directory import takes only these and
+#: discord_channels.json, and lists the other boards' files as skipped.
+BOARD_PREFIX = "jan_"
+
+
 def read_old_board_state(path):
     """The web board's <name>_discord.json and discord_channels.json: one
     file, or every such file directly in a directory. Each is one row of
@@ -391,6 +403,10 @@ def read_old_board_state(path):
         if not (n.endswith("_discord.json") or n == "discord_channels.json"):
             skipped.append((n, "not a board state file (<name>_discord.json, "
                                "discord_channels.json)"))
+            continue
+        if n != "discord_channels.json" and not n.startswith(BOARD_PREFIX):
+            skipped.append((n, "another board's state (this board's files "
+                               "start with %s)" % BOARD_PREFIX))
             continue
         try:
             data = _read_json(f)
