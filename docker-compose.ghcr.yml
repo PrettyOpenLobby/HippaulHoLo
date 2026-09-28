@@ -7,20 +7,20 @@
 # (or COMPOSE_FILE=docker-compose.yml:docker-compose.ghcr.yml in .env, then
 # plain `docker compose up -d`). This override is applied after OpenLobby's
 # two files (README, "Without building"). For both PS2 titles set
-# CRYSTALHOLO_TAG=with-crystalmaster and POL_TITLES=tmtitle,jantitle. Needs
+# HIPPAULHOLO_TAG=with-hippaulmaster and POL_TITLES=tmtitle,jantitle. Needs
 # Docker Compose 2.24 or newer (the `!reset` that drops the build step).
 
 services:
   login:
-    image: ghcr.io/prettyopenlobby/crystalholo:${CRYSTALHOLO_TAG:-latest}
+    image: ghcr.io/prettyopenlobby/hippaulholo:${HIPPAULHOLO_TAG:-${CRYSTALHOLO_TAG:-latest}}
     pull_policy: missing
     build: !reset null
   authsess:
-    image: ghcr.io/prettyopenlobby/crystalholo:${CRYSTALHOLO_TAG:-latest}
+    image: ghcr.io/prettyopenlobby/hippaulholo:${HIPPAULHOLO_TAG:-${CRYSTALHOLO_TAG:-latest}}
     pull_policy: missing
   jan:
-    image: ghcr.io/prettyopenlobby/crystalholo:${CRYSTALHOLO_TAG:-latest}
+    image: ghcr.io/prettyopenlobby/hippaulholo:${HIPPAULHOLO_TAG:-${CRYSTALHOLO_TAG:-latest}}
     pull_policy: missing
   board:
-    image: ghcr.io/prettyopenlobby/crystalholo:${CRYSTALHOLO_TAG:-latest}
+    image: ghcr.io/prettyopenlobby/hippaulholo:${HIPPAULHOLO_TAG:-${CRYSTALHOLO_TAG:-latest}}
     pull_policy: missing

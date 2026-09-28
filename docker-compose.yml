@@ -20,17 +20,17 @@
 # entries; the two services added here name them and wait for them the same
 # way. Each applies Janhourou's migrations (services/jan_migrations/) at start.
 #
-# Running Tetra Master as well: build this image on top of CrystalMaster's
-# (OPENLOBBY_IMAGE=crystalmaster:latest, POL_TITLES=tmtitle,jantitle) and
+# Running Tetra Master as well: build this image on top of HippaulMaster's
+# (OPENLOBBY_IMAGE=hippaulmaster:latest, POL_TITLES=tmtitle,jantitle) and
 # stack the three compose files; see README.md, "With Tetra Master".
 
 services:
   # login builds the title image; authsess and jan consume it. Exactly one
   # builder, so parallel builds cannot race on the tag.
   login:
-    image: crystalholo:latest
+    image: hippaulholo:latest
     build:
-      context: ../crystalholo
+      context: ../hippaulholo
       args:
         OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
     pull_policy: build
@@ -38,7 +38,7 @@ services:
       POL_TITLES: "${POL_TITLES:-jantitle}"
 
   authsess:
-    image: crystalholo:latest
+    image: hippaulholo:latest
     pull_policy: never
     environment:
       POL_TITLES: "${POL_TITLES:-jantitle}"
@@ -47,7 +47,7 @@ services:
   # zone and table session the client opens beside its auth session. The
   # hands themselves are played on the auth band, in login and authsess.
   jan:
-    image: crystalholo:latest
+    image: hippaulholo:latest
     pull_policy: never
     restart: unless-stopped
     entrypoint: ["python", "janhourou.py", "--serve"]
@@ -81,7 +81,7 @@ services:
   # client (README.md, "The live board").
   #   docker compose ... --profile board up -d
   board:
-    image: crystalholo:latest
+    image: hippaulholo:latest
     pull_policy: never
     restart: unless-stopped
     profiles: ["board"]

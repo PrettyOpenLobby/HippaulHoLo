@@ -9,7 +9,7 @@
 # the title package; docker-compose.yml swaps it in for login and authsess
 # and adds the listener. Build the core first (`docker compose up -d --build`
 # in the OpenLobby checkout), or point OPENLOBBY_IMAGE at the image you use
-# (the CrystalMaster image, for a server that runs both titles).
+# (the HippaulMaster image, for a server that runs both titles).
 ARG OPENLOBBY_IMAGE=openlobby:latest
 FROM ${OPENLOBBY_IMAGE}
 

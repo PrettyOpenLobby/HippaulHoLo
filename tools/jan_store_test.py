@@ -59,7 +59,7 @@ def migrations(janstore):
     print("migrations")
     from polcore import db
     applied = db.migrate(directory=janstore.MIGRATIONS_DIR, log=lambda m: None)
-    check("CrystalHoLo's set applies on an empty database", applied == ["4001_jan_state"],
+    check("HippaulHoLo's set applies on an empty database", applied == ["4001_jan_state"],
           applied)
     tables = {r["table_name"] for r in db.query(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")}

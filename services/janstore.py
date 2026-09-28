@@ -1,4 +1,4 @@
-"""janstore.py -- where CrystalHoLo reaches OpenLobby's storage layer.
+"""janstore.py -- where HippaulHoLo reaches OpenLobby's storage layer.
 
 Janhourou keeps two kinds of state outside the process that made it:
 
@@ -26,14 +26,14 @@ Finding polcore:
 Migrations are services/jan_migrations/NNNN_name.sql, applied with
 `polcore.db.migrate(directory=...)`. They share OpenLobby's schema_migrations
 table, which is keyed by the version number alone, so each repository owns a
-range: CrystalHoLo numbers its files 4001..4999, and every table it creates
+range: HippaulHoLo numbers its files 4001..4999, and every table it creates
 starts with `jan_`. A version number that appears in two sets would be taken
 as already applied by whichever set ran second.
 
 Every live key starts with `jan:` (below polcore.kv's own POL_KV_PREFIX).
 
     python janstore.py migrate     apply what is pending (uses POL_DATABASE_URL)
-    python janstore.py status      list CrystalHoLo's migrations and their state
+    python janstore.py status      list HippaulHoLo's migrations and their state
     python janstore.py import event FILE [--merge] [--dry-run]
     python janstore.py import rank_snapshot FILE [--merge] [--dry-run]
     python janstore.py import board_state FILE|DIR [--merge] [--dry-run]
@@ -58,7 +58,7 @@ import threading
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-#: CrystalHoLo's migration files. Versions 4001..4999 are this repository's.
+#: HippaulHoLo's migration files. Versions 4001..4999 are this repository's.
 MIGRATIONS_DIR = os.path.join(_HERE, "jan_migrations")
 
 #: The prefix of every live key this repository writes.
@@ -136,7 +136,7 @@ def errors():
 
 
 def ensure_schema(log=None):
-    """Apply CrystalHoLo's pending migrations, once per process and database.
+    """Apply HippaulHoLo's pending migrations, once per process and database.
 
     Cheap after the first call. Raises what `polcore.db.migrate` raises when
     the database cannot be reached, and remembers nothing then, so the next
@@ -440,7 +440,7 @@ def import_source(store, path, merge=False, dry_run=False, out=print):
         ensure_schema(log=lambda msg: out("  " + msg))
     status = None
     try:
-        with db.transaction(lock="crystalholo.import") as conn:
+        with db.transaction(lock="hippaulholo.import") as conn:
             for p in plans:
                 p.exists = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS ok",
                                         (p.table,)).fetchone()["ok"]
