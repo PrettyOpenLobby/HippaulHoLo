@@ -97,6 +97,8 @@ def member_names(members, ttl=60.0):
             _WARNED.add("names")
             print("[boardjan] cannot read names from %s (%s) -- rows show "
                   "without them" % (accounts_path(), e), flush=True)
+        # None, not {m: ""}: janstats reads "" as a deleted account and drops
+        # the row, so a DB error would empty the whole ranking
         return None
     with _NAMES_LOCK:
         _NAMES.update(t=now, map=out)
