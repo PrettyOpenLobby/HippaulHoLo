@@ -34,7 +34,22 @@ Every live key starts with `jan:` (below polcore.kv's own POL_KV_PREFIX).
 
     python janstore.py migrate     apply what is pending (uses POL_DATABASE_URL)
     python janstore.py status      list CrystalHoLo's migrations and their state
+    python janstore.py import event FILE [--merge] [--dry-run]
+    python janstore.py import rank_snapshot FILE [--merge] [--dry-run]
+    python janstore.py import board_state FILE|DIR [--merge] [--dry-run]
+
+`import` moves what an earlier release kept in files into the tables:
+`event` reads janevent.json into the 'current' row of jan_event,
+`rank_snapshot` reads jan-rank-snapshot.json into jan_rank_snapshot (one row
+per category), and `board_state` reads the web board's <name>_discord.json
+and discord_channels.json (a file, or every such file in a directory) into
+jan_board_state, one row per file named as the board names it. The file is
+only read. The import runs in one transaction and refuses a table that
+already holds rows (exit 2) unless --merge is given, which adds only the keys
+the table lacks. A second run finds nothing to add. --dry-run prints the
+same report and writes nothing. Entries it cannot map are listed and skipped.
 """
+import datetime
 import json
 import os
 import sys
@@ -268,7 +283,237 @@ def where():
         return "(an unparsable POL_DATABASE_URL)"
 
 
+# --------------------------------------------------------------------------- #
+# importing the files an earlier release kept
+# --------------------------------------------------------------------------- #
+class SourceError(RuntimeError):
+    """The source cannot be read as the file it should be."""
+
+
+class _Rollback(Exception):
+    pass
+
+
+class Plan:
+    """One target table of an import: the rows read, and what became of them."""
+
+    def __init__(self, table, key, cols, rows, jsonb=(), compare_skip=()):
+        self.table, self.key, self.cols = table, tuple(key), tuple(cols)
+        self.rows, self.jsonb = rows, set(jsonb)
+        self.compare_skip = set(compare_skip)
+        self.target = 0
+        self.exists = False
+        self.new, self.same, self.differs, self.dups = [], 0, [], 0
+        self.inserted = 0
+
+    def keyof(self, row):
+        return tuple(row[c] for c in self.key)
+
+
+def _mtime(path):
+    return datetime.datetime.fromtimestamp(os.path.getmtime(path),
+                                           datetime.timezone.utc)
+
+
+def _read_json(path, want=dict):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as exc:
+        raise SourceError("cannot read %s: %s" % (path, exc)) from None
+    except ValueError as exc:
+        raise SourceError("%s is not JSON: %s" % (path, exc)) from None
+    if not isinstance(data, want):
+        raise SourceError("%s holds a %s, not the JSON object the game wrote"
+                          % (path, type(data).__name__))
+    return data
+
+
+def _json_ok(value):
+    """The value survives a JSONB round trip (no NUL, which jsonb refuses)."""
+    return "\\u0000" not in json.dumps(value)
+
+
+def read_old_event(path):
+    """janevent.py's record ({id, name, opens_at, closes_at, auto}) as the
+    'current' row of jan_event."""
+    rec = _read_json(path)
+    rows, skipped = [], []
+    try:
+        if "id" not in rec:
+            raise ValueError("the record has no event id")
+        int(rec["id"])
+        if not _json_ok(rec):
+            raise ValueError("the record holds a NUL character")
+        rows.append({"name": "current", "data": rec, "updated_at": _mtime(path)})
+    except (TypeError, ValueError) as exc:
+        skipped.append(("the event record", str(exc)))
+    return [Plan("jan_event", ("name",), ("name", "data", "updated_at"), rows,
+                 jsonb=("data",), compare_skip=("updated_at",))], skipped
+
+
+def read_old_rank_snapshot(path):
+    """janstats.py's {category: [member, ...]} as one jan_rank_snapshot row
+    per category, named by the category alone as the server names its own."""
+    snap = _read_json(path)
+    rows, skipped = [], []
+    stamp = _mtime(path)
+    for cat, order in sorted(snap.items()):
+        if not str(cat).isdigit():
+            skipped.append(("category %r" % cat, "not a category number"))
+        elif not isinstance(order, list):
+            skipped.append(("category %r" % cat, "holds a %s, not the list of "
+                            "members" % type(order).__name__))
+        elif not _json_ok(order):
+            skipped.append(("category %r" % cat, "holds a NUL character"))
+        else:
+            rows.append({"category": str(cat), "data": order, "updated_at": stamp})
+    return [Plan("jan_rank_snapshot", ("category",), ("category", "data", "updated_at"),
+                 rows, jsonb=("data",), compare_skip=("updated_at",))], skipped
+
+
+def read_old_board_state(path):
+    """The web board's <name>_discord.json and discord_channels.json: one
+    file, or every such file directly in a directory. Each is one row of
+    jan_board_state named for the file without its extension, which is the
+    name polboards gives it."""
+    if os.path.isdir(path):
+        files = [os.path.join(path, n) for n in sorted(os.listdir(path))]
+    elif os.path.isfile(path):
+        files = [path]
+    else:
+        raise SourceError("%s does not exist" % path)
+    rows, skipped = [], []
+    for f in files:
+        n = os.path.basename(f)
+        if not os.path.isfile(f):
+            continue
+        if not (n.endswith("_discord.json") or n == "discord_channels.json"):
+            skipped.append((n, "not a board state file (<name>_discord.json, "
+                               "discord_channels.json)"))
+            continue
+        try:
+            data = _read_json(f)
+            if not _json_ok(data):
+                raise SourceError("holds a NUL character")
+        except SourceError as exc:
+            skipped.append((n, str(exc)))
+            continue
+        rows.append({"name": n[:-len(".json")], "data": data, "updated_at": _mtime(f)})
+    return [Plan("jan_board_state", ("name",), ("name", "data", "updated_at"), rows,
+                 jsonb=("data",), compare_skip=("updated_at",))], skipped
+
+
+IMPORTS = {"event": read_old_event, "rank_snapshot": read_old_rank_snapshot,
+           "board_state": read_old_board_state}
+
+
+def import_source(store, path, merge=False, dry_run=False, out=print):
+    """Import one old source. Returns the exit status: 0 done, nothing to do
+    or dry run; 1 the source or the database failed; 2 refused, the table
+    already holds rows and the source has rows it lacks (without --merge)."""
+    try:
+        plans, skipped = IMPORTS[store](path)
+    except SourceError as exc:
+        out("error: %s" % exc)
+        return 1
+    out("import %s: %s" % (store, path))
+    for what, why in skipped:
+        out("  skipped %s: %s" % (what, why))
+    if not dry_run:
+        ensure_schema(log=lambda msg: out("  " + msg))
+    status = None
+    try:
+        with db.transaction(lock="crystalholo.import") as conn:
+            for p in plans:
+                p.exists = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS ok",
+                                        (p.table,)).fetchone()["ok"]
+                if not p.exists and not dry_run:
+                    raise RuntimeError("%s does not exist after the migrations" % p.table)
+                have = {}
+                if p.exists:
+                    have = {p.keyof(r): r for r in conn.execute(
+                        "SELECT %s FROM %s" % (", ".join(p.cols), p.table))}
+                p.target = len(have)
+                seen = set()
+                for r in p.rows:
+                    k = p.keyof(r)
+                    if k in seen:
+                        p.dups += 1
+                        continue
+                    seen.add(k)
+                    if k not in have:
+                        p.new.append(r)
+                    elif all(have[k][c] == r[c] for c in p.cols if c not in p.compare_skip):
+                        p.same += 1
+                    else:
+                        p.differs.append(k)
+            for p in plans:
+                out("  %s: %d read, %d in the table%s, %d already there, %d to insert"
+                    % (p.table, len(p.rows), p.target,
+                       "" if p.exists else " (not created yet)",
+                       p.same + len(p.differs), len(p.new)))
+                for k in p.differs:
+                    out("    kept the table's row, the file's differs: %s" % (k,))
+            if any(p.new and p.target for p in plans) and not merge:
+                status = "refused"
+                raise _Rollback()
+            if dry_run:
+                status = "dry-run"
+                raise _Rollback()
+            for p in plans:
+                sql = "INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING" % (
+                    p.table, ", ".join(p.cols),
+                    ", ".join("%s::jsonb" if c in p.jsonb else "%s" for c in p.cols))
+                for r in p.new:
+                    p.inserted += conn.execute(sql, [
+                        jsonb(r[c]) if c in p.jsonb else r[c] for c in p.cols]).rowcount
+            status = "done" if any(p.inserted for p in plans) else "nothing"
+    except _Rollback:
+        pass
+    except errors() + (RuntimeError,) as exc:
+        out("FAILED, rolled back: %s" % exc)
+        return 1
+    if status == "refused":
+        out("REFUSED: %s already holds rows. Nothing was written. Run again "
+            "with --merge to add only the keys it lacks."
+            % ", ".join(p.table for p in plans if p.new and p.target))
+        return 2
+    if status == "dry-run":
+        out("Dry run: nothing was written.")
+    elif status == "nothing":
+        out("Nothing to import: the table already holds every entry. "
+            "Nothing was changed.")
+    else:
+        out("Done: %d row(s) written." % sum(p.inserted for p in plans))
+    return 0
+
+
+def _import_main(argv):
+    import argparse
+    ap = argparse.ArgumentParser(prog="python janstore.py import",
+                                 description="Import what an earlier release "
+                                 "kept in files (uses POL_DATABASE_URL).")
+    ap.add_argument("store", choices=sorted(IMPORTS))
+    ap.add_argument("source")
+    ap.add_argument("--merge", action="store_true",
+                    help="add only the keys the table lacks")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="report what would be imported; write nothing")
+    args = ap.parse_args(argv)
+    try:
+        return import_source(args.store, args.source, merge=args.merge,
+                             dry_run=args.dry_run)
+    except errors() as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+
 def _main(argv):
+    if argv and argv[0] == "import":
+        return _import_main(argv[1:])
     if not argv or argv[0] not in ("migrate", "status"):
         print(__doc__)
         return 2
