@@ -179,6 +179,26 @@ PTL_T_TEXT2_MAX = PTL_TABLE_REC - PTL_T_TEXT2   # 64
 #: panels parse the CSV at `b/g/MJSTableInfoSub` +0x2EC; the PTL row's own
 #: +0x28 copy is read only for fields 4/5/9 (lobbysub.c:1465-1469). Both are
 #: authored from the same producer so they cannot disagree.
+#:
+#: SECOND SOURCE, NAMES ONLY. Project Crystal Server's table row
+#: (MJServer/Models/Table.cs:236) writes the same 14 fields and names five of
+#: ours differently, 0-based:
+#:
+#:     4  sort       -> ReservationTimer (it writes 10)
+#:     5  filter_a   -> CanSpectate
+#:     9  filter_b   -> HasPassword
+#:     10 f11        -> RulesSetByMaster
+#:     11 f12        -> CommentId
+#:     13 f14        -> Restrictions
+#:
+#: (8 master_seat agrees.) What OUR decompile shows for the three the room
+#: list reads (lobbysub__002b79e0, lobbysub.c:1465-1469): 5 and 9 go through
+#: the same filter test as the search dialog's conditions, which fits "can
+#: spectate" / "has password"; 4 is copied into the array the list is SORTED
+#: by (lobbysub.c:1492, 1507: sort__002cebd0 over it). Nothing reads 4 as a
+#: timer, so the name stays `sort` and the value stays ours (index + 1) --
+#: Crystal's 10 would sort every table equal. Unverified either way; if a live
+#: client ever shows a reservation countdown, field 4 is the first suspect.
 PTL_CSV_FIELDS = [
     ("number", 5), ("info_key1", 5), ("info_key2", 3), ("f4", 3), ("sort", 3),
     ("filter_a", 1), ("ready_mask", 2), ("reserved_seat", 2), ("master_seat", 1),
