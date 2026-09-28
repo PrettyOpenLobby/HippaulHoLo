@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          path: crystalholo
+          path: hippaulholo
       - uses: actions/checkout@v4
         with:
           repository: PrettyOpenLobby/OpenLobby
@@ -34,6 +34,6 @@ jobs:
       # Valkey containers (Docker is on the runner), and must not skip here
       - run: pip install pyyaml pycryptodome pillow "psycopg[binary]" psycopg-pool valkey
       - run: python tools/jan_run_all.py
-        working-directory: crystalholo
+        working-directory: hippaulholo
         env:
           POL_TEST_REQUIRE_DB: "1"

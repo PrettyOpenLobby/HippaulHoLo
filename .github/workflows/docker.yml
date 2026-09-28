@@ -77,16 +77,18 @@ jobs:
         with:
           images: ${{ steps.name.outputs.image }}
           tags: |
+            type=raw,value=with-hippaulmaster,enable={{is_default_branch}}
+            # the tag's name before the rename, for a .env that still asks for it
             type=raw,value=with-crystalmaster,enable={{is_default_branch}}
-            type=semver,pattern={{version}},suffix=-with-crystalmaster
-            type=sha,suffix=-with-crystalmaster
+            type=semver,pattern={{version}},suffix=-with-hippaulmaster
+            type=sha,suffix=-with-hippaulmaster
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           build-args: |
-            OPENLOBBY_IMAGE=${{ steps.name.outputs.owner }}/crystalmaster:latest
+            OPENLOBBY_IMAGE=${{ steps.name.outputs.owner }}/hippaulmaster:latest
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

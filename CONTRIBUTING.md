@@ -1,6 +1,6 @@
-# Contributing to CrystalHoLo
+# Contributing to HippaulHoLo
 
-CrystalHoLo is the Janhourou title for the OpenLobby core: the mahjong
+HippaulHoLo is the Janhourou title for the OpenLobby core: the mahjong
 game, its lobby lists, the player records and rankings, and an optional live
 board. This page says where things are, how to run the checks, and what a
 pull request needs. The README covers bringing the server up.
@@ -31,7 +31,7 @@ services/
   janevent.py       the running event, for the Event ranking
   janstore.py       reaches the core's polcore: the durable tables, the
                     live keys (jan:*), migrate, status and import
-  jan_migrations/   CrystalHoLo's migrations, numbered from 4001
+  jan_migrations/   HippaulHoLo's migrations, numbered from 4001
   boardjan.py       the live board of the rankings (the `board` profile)
   polboards.py      the board service the live board runs in
   polgateway.py     the Discord presence of a board bot
@@ -167,7 +167,7 @@ Anything that must survive a restart is in the core's PostgreSQL. A
 member's record is the blob (`<member>`, `jan_stats.json`) in the core's
 `blob` table, read and written through `janstats.load` and `janstats.store`.
 The event record, the ranking's previous order and the board's Discord
-bookkeeping are CrystalHoLo's own tables (`jan_event`, `jan_rank_snapshot`,
+bookkeeping are HippaulHoLo's own tables (`jan_event`, `jan_rank_snapshot`,
 `jan_board_state`), through `janstore.py`. Live state that several
 containers read (the seats, each table's rules, the room-key cache, the
 tables being watched) goes in Valkey through the core's `polcore.kv` under
@@ -178,7 +178,7 @@ operator edits.
 A schema change is a new file in `services/jan_migrations/` with the next
 number. A shipped migration is never edited. The core's `schema_migrations`
 table is keyed by the number alone and shared with the core and the other
-titles, so CrystalHoLo keeps to 4001-4999 and a table name that starts with
+titles, so HippaulHoLo keeps to 4001-4999 and a table name that starts with
 `jan_`; a reused number is silently skipped.
 
 Moving a file into the database comes with an importer in `janstore.py`

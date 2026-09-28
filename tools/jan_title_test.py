@@ -59,7 +59,7 @@ def main():
     check("the core's fresh-blob table took the save magic",
           R.RESOURCE_INIT.get("U/g/MJSUserData"), struct.pack("<I", 0x02030100))
     check("the title's POLpro templates are merged into the core's",
-          any(p.endswith("polpro.json") and "crystalholo" in p.replace("\\", "/").lower()
+          any(p.endswith("polpro.json") and "hippaulholo" in p.replace("\\", "/").lower()
               or p == jantitle.POLPRO_SPEC_CANDIDATES[1]
               for p in R.polpro.EXTRA_SPEC_FILES) if R.polpro else True)
 

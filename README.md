@@ -1,4 +1,4 @@
-# CrystalHoLo
+# HippaulHoLo
 
 A server reimplementation for Square Enix's Janhourou, the PlayStation 2
 mahjong parlour of the PlayOnline service (2003-2007, Japan only). Together
@@ -25,6 +25,9 @@ adds the listener, and an optional live board.
 
 ## Prerequisites
 
+- This repository checked out as `hippaulholo`, which is where the compose files
+  look for it (`git clone https://github.com/PrettyOpenLobby/HippaulHoLo.git hippaulholo`).
+  A checkout from before the rename, still named `crystalholo`, needs renaming.
 - The OpenLobby core, checked out beside this repository and already built
   once (`docker compose up -d --build` in that checkout)
 - A PlayStation 2 with PlayOnline and Janhourou installed on its hard disk,
@@ -41,7 +44,7 @@ docker compose --project-directory ../openlobby \
 ```
 
 That rebuilds the core's `login` and `authsess` containers from the
-`crystalholo` image (the core image plus this title), starts the `jan`
+`hippaulholo` image (the core image plus this title), starts the `jan`
 listener on 51272, and leaves everything else the core's. The image is
 layered on whatever `openlobby:latest` is on your machine: after pulling a
 newer OpenLobby, rebuild it there first (`docker compose build` in its
@@ -80,13 +83,13 @@ has nothing to import: an install that never ran an event has no
 
 ### With Tetra Master
 
-Both titles run in the same processes. With CrystalMaster brought up once
+Both titles run in the same processes. With HippaulMaster brought up once
 (so its image exists), build this image on top of it and name both plugins:
 
 ```
-OPENLOBBY_IMAGE=crystalmaster:latest POL_TITLES=tmtitle,jantitle \
+OPENLOBBY_IMAGE=hippaulmaster:latest POL_TITLES=tmtitle,jantitle \
 docker compose --project-directory ../openlobby \
-    -f ../openlobby/docker-compose.yml -f ../crystalmaster/docker-compose.yml \
+    -f ../openlobby/docker-compose.yml -f ../hippaulmaster/docker-compose.yml \
     -f docker-compose.yml up -d --build
 ```
 
@@ -95,7 +98,7 @@ the lobby lists a console asks for are the title's it is in.
 
 ### Without building
 
-The image is published to `ghcr.io/prettyopenlobby/crystalholo` on every push,
+The image is published to `ghcr.io/prettyopenlobby/hippaulholo` on every push,
 layered on the published OpenLobby image. Apply the pull-only overrides of
 both repositories after their compose files, from this directory:
 
@@ -103,11 +106,13 @@ both repositories after their compose files, from this directory:
 docker compose --project-directory ../openlobby     -f ../openlobby/docker-compose.yml -f ../openlobby/docker-compose.ghcr.yml     -f docker-compose.yml -f docker-compose.ghcr.yml up -d
 ```
 
-`CRYSTALHOLO_TAG` and `OPENLOBBY_TAG` pick the versions (default `latest`). A second image, tagged `with-crystalmaster`, is built on
-CrystalMaster's instead of OpenLobby's: set
-`CRYSTALHOLO_TAG=with-crystalmaster` and `POL_TITLES=tmtitle,jantitle`
+`HIPPAULHOLO_TAG` and `OPENLOBBY_TAG` pick the versions (default `latest`). A second image, tagged `with-hippaulmaster`, is built on
+HippaulMaster's instead of OpenLobby's: set
+`HIPPAULHOLO_TAG=with-hippaulmaster` and `POL_TITLES=tmtitle,jantitle`
 in `.env` to run both PS2 titles from it, with the four overrides
 (OpenLobby's two, then this repository's two).
+`CRYSTALHOLO_TAG`, the name from before the rename, is still read when
+`HIPPAULHOLO_TAG` is unset.
 
 ## Pointing a client at it
 
