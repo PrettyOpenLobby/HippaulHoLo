@@ -18,11 +18,18 @@ the suite ends; with no server they SKIP, or FAIL under POL_TEST_REQUIRE_DB=1.
 No suite ever sees a POL_DATABASE_URL or POL_VALKEY_URL from the environment
 it was started in: live state is each suite's own in-memory store unless the
 suite starts a Valkey of its own.
+
+POL_DATA_DIR, POL_RESOURCE_DIR, POL_LOG_DIR and POL_LOGIN_PW_KEYFILE that
+are not set point into a temporary directory made for the run and removed
+at the end (scratch_state).
 """
 import argparse
+import atexit
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -105,7 +112,45 @@ def _fresh_database():
         return None, "no test database (%s)" % exc
 
 
+#: The state paths a suite falls back to when they are unset (see scratch_state).
+SCRATCH_VARS = ("POL_DATA_DIR", "POL_RESOURCE_DIR", "POL_LOG_DIR",
+                "POL_LOGIN_PW_KEYFILE")
+
+
+def scratch_state():
+    """Point every state path a suite may fall back to at a directory made
+    for this run and removed when it ends, unless the caller set it.
+
+    A suite that finds no POL_DATA_DIR uses /data, which on Windows is the
+    root of the current drive, so a run could read and write a real server's
+    files there. A value already set wins; POL_RESOURCE_DIR then follows
+    POL_DATA_DIR, as the services derive it. Returns the directory made, or
+    None when every variable was set.
+    """
+    missing = [k for k in SCRATCH_VARS if not os.environ.get(k, "").strip()]
+    if not missing:
+        return None
+    root = tempfile.mkdtemp(prefix="jan-run-")
+    atexit.register(shutil.rmtree, root, True)
+    if "POL_DATA_DIR" in missing:
+        os.environ["POL_DATA_DIR"] = os.path.join(root, "data")
+        os.makedirs(os.environ["POL_DATA_DIR"])
+    if "POL_RESOURCE_DIR" in missing:
+        os.environ["POL_RESOURCE_DIR"] = os.path.join(os.environ["POL_DATA_DIR"],
+                                                      "resources")
+        if os.environ["POL_RESOURCE_DIR"].startswith(root):
+            os.makedirs(os.environ["POL_RESOURCE_DIR"], exist_ok=True)
+    if "POL_LOG_DIR" in missing:
+        os.environ["POL_LOG_DIR"] = os.path.join(root, "logs")
+        os.makedirs(os.environ["POL_LOG_DIR"])
+    if "POL_LOGIN_PW_KEYFILE" in missing:
+        os.makedirs(os.path.join(root, "keys"))
+        os.environ["POL_LOGIN_PW_KEYFILE"] = os.path.join(root, "keys", "login-pw.key")
+    return root
+
+
 def main():
+    scratch_state()
     ap = argparse.ArgumentParser()
     ap.add_argument("-k", action="append", default=[])
     ap.add_argument("-v", action="store_true")
