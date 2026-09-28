@@ -16,6 +16,6 @@
     selftest.py        The offline selftest (loopback, no client) and the command line.
 
 janhourou.py (one directory up) is the entry point and the compatibility
-facade over these modules. Generated from the flat janhourou.py by
-tools/split/split_jan_pkg.py and its map.
+facade over these modules. Generated once from the flat janhourou.py in
+commit edb5a51, and edited directly since.
 """

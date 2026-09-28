@@ -85,7 +85,8 @@ from jantable import (  # noqa: E402
     selftest as _selftest,
 )
 
-# Which jantable module owns each top-level name of the old jangame.py.
+# Which jantable module owns each name that `jangame.<name>` reaches. A new
+# top-level name that code outside the package uses through jangame gets a line.
 _OWNERS = {
     'BOT_POLICY': 'knobs',
     'Bot': 'bots',

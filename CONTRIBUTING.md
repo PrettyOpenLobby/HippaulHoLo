@@ -33,7 +33,6 @@ services/
   polgateway.py     the Discord presence of a board bot
 tools/              self-tests (`jan_*_test.py`), jan_run_all.py, and
                     operator tools (lobby-list inspectors, icon and font builders)
-tools/split/        the generator that cut jantable/ and janworld/, and its maps
 tests/              newer self-tests, run by jan_run_all.py
 ```
 
@@ -107,30 +106,24 @@ code under test sees it. New code should import from the packages directly.
 `tools/facade_rebind_check.py` proves the forwarding holds for every
 rebinding in the tree.
 
-### Regenerating the split
+### Changing the packages
 
-The packages are generated. `tools/split/split_jan_pkg.py` takes the flat
-module (the single file as it was before the split) and a map
-(`tools/split/split_jangame_map.txt`, `split_janhourou_map.txt`) that names
-the module each function, class, global and Table method goes to, and writes
-the package and the facade. A change made to the flat file, for instance one
-ported from another tree, is split again like this:
+`jantable/` and `janworld/` were generated once from the single-file
+`jangame.py` and `janhourou.py`, in commit edb5a51. The packages are the
+source now and are edited directly; nothing regenerates them. A change
+written against a single file elsewhere is carried over by hand into the
+module that owns that code today.
 
-```
-git show <commit before the split>:services/janhourou.py > janhourou_flat.py
-# apply the change to janhourou_flat.py
-python tools/split/split_jan_pkg.py --src janhourou_flat.py \
-    --map tools/split/split_janhourou_map.txt --package janworld \
-    --out services/janworld --facade services/janhourou.py
-```
-
-A new top-level name has to be added to the map; the tool refuses to write
-while anything is unmapped. `--check` prints the report without writing, and
-`--verify` confirms the tree is exactly what a flat file and the map give.
-Regenerating rewrites the packages from the flat file, so it only fits while
-changes still arrive as edits to that file. A change made in a package module
-directly has to be made in the flat file too, or the next regeneration
-drops it.
+`janhourou.py` and `jangame.py` stay as the entry points and as the facades
+described above. Each one forwards only the names in its `_OWNERS` table,
+which maps every name to the module that owns it, so a new top-level name
+is not reachable as `janhourou.NAME` or `jangame.NAME` until it has a line
+there. Code in the same package does not need one, since it uses
+`<module>.<name>`. `jantitle.py`, the other package, a tool or a test that
+reads or rebinds the name through a facade does, and
+`tools/facade_rebind_check.py` fails on a rebinding of a name the table does
+not list. A new module is imported at the top of the facade and added to
+`_MODULES`.
 
 ## Running the checks
 
