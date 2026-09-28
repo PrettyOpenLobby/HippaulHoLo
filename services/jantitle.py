@@ -1391,6 +1391,28 @@ def _live_games():
         return 0
 
 
+#: The service name Janhourou's own live-game count is published under
+#: (live_sessions.py: the key `live:authsess-jan`). The Jan board and the
+#: admin panel's Overview read it.
+LIVE_SERVICE = "authsess-jan"
+
+
+def _publish_live(n):
+    """Publish Janhourou's count of hanchan in progress as its own marker.
+
+    Called from `live_games`, which the core asks from its `authsess-titles`
+    heartbeat. That heartbeat runs every 10 s and only in the authsess
+    process, the one that holds the games, so the marker is written by the
+    right process and at the right pace without a thread of our own. A
+    login process never asks, so it never overwrites the count with a 0.
+    """
+    try:
+        import live_sessions
+        live_sessions.write_marker(LIVE_SERVICE, n)
+    except Exception:                                         # noqa: BLE001
+        pass
+
+
 def _begin_shutdown():
     """A container stop used to SIGKILL the process, and a game in progress
     froze the console on a socket that vanished under it. The core holds the
@@ -1502,7 +1524,9 @@ class Janhourou(titles.Title):
                             f"to member {member_id} ({why})")
 
     def live_games(self):
-        return _live_games()
+        n = _live_games()
+        _publish_live(n)
+        return n
 
     def begin_shutdown(self):
         _begin_shutdown()

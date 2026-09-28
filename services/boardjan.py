@@ -163,11 +163,12 @@ def _sig(lists):
 
 #: the sidebar's "Recent games": the newest finished hanchan across everyone
 RECENT_MAX = 12
-#: authsess's Jan marker (services/live_sessions.py): {"count", "stamp"},
-#: rewritten every few seconds while authserv runs. pol-git-sync trusts a
-#: stamp for POL_DEPLOY_MATCH_GRACE_S (900 s) before a push may restart a
-#: game; the board reads it the same way.
-LIVE_MARKER = "authsess-jan-sessions-live.json"
+#: authsess's Jan marker, `live:authsess-jan` in Valkey (the core's
+#: live_sessions.py, published by jantitle): {"count", "stamp"}, rewritten
+#: every few seconds while authserv runs. pol-git-sync trusts a stamp for
+#: POL_DEPLOY_MATCH_GRACE_S (900 s) before a push may restart a game; the
+#: board reads it the same way.
+LIVE_MARKER = "authsess-jan"
 LIVE_GRACE_S = float(os.environ.get("POL_DEPLOY_MATCH_GRACE_S", "900") or 900)
 
 
@@ -193,13 +194,14 @@ def live_games(now=None):
     """How many hanchan authsess has in progress: the marker's count while
     its stamp is fresh, 0 once it is stale, None when there is no marker
     (the page then says nothing rather than a false 0)."""
-    path = os.path.join(os.environ.get("POL_DATA_DIR", "/data"), LIVE_MARKER)
     try:
-        with open(path, encoding="utf-8") as fh:
-            d = json.load(fh) or {}
+        import live_sessions
+        d = live_sessions.read_marker(LIVE_MARKER)
+        if d is None:
+            return None
         stamp = float(d.get("stamp") or 0)
         count = int(d.get("count") or 0)
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (ImportError, ValueError, TypeError, AttributeError):
         return None
     now = time.time() if now is None else now
     return count if 0 <= now - stamp < LIVE_GRACE_S else 0
