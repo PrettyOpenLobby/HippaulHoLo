@@ -855,7 +855,13 @@ RANK_PREV_VALUE = {0: 35, 1: 36, 2: 37, 3: 38, 4: 39}     # category -> vN
 RANK_LIST_STEM = "MJS"                  # `U/g/%s_RANKLIST` (mg.c:1019) + category
 RANK_LIST_MAX = 100                     # the widget array holds 113; 100 is a page
                                         # count the client's own paging expects
-RANK_SNAPSHOT = "jan-rank-snapshot.json"
+#: The previous order of each rank list, which feeds the up/down/New glyph: the
+#: jan_rank_snapshot table (PostgreSQL, through janstore; it was the file
+#: <resources>/jan-rank-snapshot.json), one row per category.
+RANK_SNAPSHOT = "jan_rank_snapshot"
+#: prefixed to each category's row name; the self-test sets a scope of its own
+#: so running it on a live server cannot move anyone's glyph
+_SNAPSHOT_SCOPE = [""]
 
 _PO_LAYOUT = (
     (0, 1, "u64", 0x10), (1, 1, "int", 0x18), (2, 1, "str", 0x00),
@@ -994,27 +1000,40 @@ def all_members():
     return sorted(out)
 
 
-def _snapshot_path():
-    return os.path.join(stats_dir(), RANK_SNAPSHOT)
-
-
 def _snapshot_load():
+    """{category (str): [member, ...]} as last remembered, or {} (also when the
+    database cannot be reached: every row then reads as new)."""
+    scope = _SNAPSHOT_SCOPE[0]
     try:
-        with open(_snapshot_path(), encoding="utf-8") as f:
-            d = json.load(f)
-        return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
+        import janstore
+        janstore.ensure_schema()
+        rows = janstore.db.query("SELECT category, data FROM jan_rank_snapshot"
+                                 " WHERE left(category, %s) = %s", (len(scope), scope))
+    except Exception:                                       # noqa: BLE001
         return {}
+    out = {}
+    for r in rows:
+        cat = r["category"][len(scope):]
+        if cat.isdigit() and isinstance(r["data"], list):
+            out[cat] = r["data"]
+    return out
 
 
 def _snapshot_store(d):
+    """Remember each category's order. Never raises: a failed write only means
+    the next list compares against an older one."""
+    scope = _SNAPSHOT_SCOPE[0]
     try:
-        os.makedirs(stats_dir(), exist_ok=True)
-        tmp = _snapshot_path() + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(d, f)
-        os.replace(tmp, _snapshot_path())
-    except OSError:
+        import janstore
+        janstore.ensure_schema()
+        with janstore.db.transaction() as conn:
+            for cat, order in d.items():
+                janstore.db.execute(
+                    "INSERT INTO jan_rank_snapshot (category, data) VALUES (%s, %s::jsonb)"
+                    " ON CONFLICT (category) DO UPDATE SET data = EXCLUDED.data,"
+                    " updated_at = now()",
+                    (scope + str(cat), janstore.jsonb(order)), conn=conn)
+    except Exception:                                       # noqa: BLE001
         pass
 
 
@@ -1025,8 +1044,9 @@ def rank_list(category, limit=RANK_LIST_MAX, names=None, content_ids=None,
     Only members who have PLAYED are ranked. `names`/`content_ids` are
     `{member: value}` lookups the caller (responders) resolves from the
     accounts DB; the record's own stored name is the fallback. The previous
-    order is kept in a snapshot file (its own file, so the login container
-    never rewrites a member's record) and feeds the up/down/New glyph.
+    order is kept apart from the records (RANK_SNAPSHOT, so the login
+    container never rewrites a member's record) and feeds the up/down/New
+    glyph.
     """
     category = int(category)
     if category not in RANK_SORT_VALUE:
@@ -1110,6 +1130,8 @@ def selftest():
     old = os.environ.get("POL_RESOURCE_DIR")
     tmp = tempfile.mkdtemp(prefix="janstats-")
     os.environ["POL_RESOURCE_DIR"] = tmp
+    old_scope = _SNAPSHOT_SCOPE[0]
+    _SNAPSHOT_SCOPE[0] = "selftest-%s:" % os.path.basename(tmp)
     try:
         ok &= check(load(9)["games_played"] == 0, "an unknown member reads blank")
         ok &= check(recent_places(9) == [NO_RANK] * 4,
@@ -1359,6 +1381,13 @@ def selftest():
             os.environ.pop("POL_RESOURCE_DIR", None)
         else:
             os.environ["POL_RESOURCE_DIR"] = old
+        try:
+            import janstore
+            janstore.db.execute("DELETE FROM jan_rank_snapshot WHERE left(category, %s) = %s",
+                                (len(_SNAPSHOT_SCOPE[0]), _SNAPSHOT_SCOPE[0]))
+        except Exception:                                   # noqa: BLE001
+            pass
+        _SNAPSHOT_SCOPE[0] = old_scope
 
     print("janstats selftest: %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1

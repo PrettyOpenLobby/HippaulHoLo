@@ -990,6 +990,9 @@ def main():
         print(wirelog.describe(rec))
         return 0
     if a.serve:
+        if os.environ.get("POL_DATABASE_URL", "").strip():
+            import janstore                 # Janhourou's tables, before the first table
+            janstore.migrate_at_start("janhourou")
         server.serve(port=a.port)
         return 0
     return selftest()

@@ -8,6 +8,10 @@ Pins: the five categories in janstats' own order and values; names read from
 accounts.db READ-ONLY (the file is byte-identical afterwards); the up/down/New
 glyph from the previous rank; that the board NEVER rewrites the rank snapshot
 the client's glyph compares against; and the page server's routes.
+
+The rank snapshot is a PostgreSQL table (jan_rank_snapshot), so this suite runs
+on a throwaway database (janpg.py): the runner's, or its own. Without a server
+it reports SKIP, or FAIL under POL_TEST_REQUIRE_DB=1.
 """
 import hashlib
 import json
@@ -22,6 +26,8 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, os.pardir, "services"))
+sys.path.insert(0, HERE)
+import janpg                                                   # noqa: E402
 
 CHECKS = []
 
@@ -335,10 +341,16 @@ def discord_checks(tmp, boardjan, polboards):
           boardjan.discord_events(s_c, s_a) == [] and boardjan.discord_events(s_a, s_c) == [])
     check("no webhook = nothing posted, whatever the board does",
           polboards.Discord("jan", "", state, opener=net).tick("x", build) is None)
-    check("without a state dir the id is not kept (and main() says so)",
-          os.path.normpath(polboards.state_path(args, "jan"))
-          in (os.devnull, os.path.normpath("/state/jan_discord.json"))
-          or os.environ.get("POL_BOARDS_STATE_DIR"))
+    _url = os.environ.pop("POL_DATABASE_URL")          # this one is about files
+    try:
+        check("without a database or a state dir the id is not kept (and main() says so)",
+              os.path.normpath(polboards.state_path(args, "jan"))
+              in (os.devnull, os.path.normpath("/state/jan_discord.json"))
+              or os.environ.get("POL_BOARDS_STATE_DIR"))
+    finally:
+        os.environ["POL_DATABASE_URL"] = _url
+    check("with a database the id is a jan_board_state row",
+          polboards.state_path(args, "jan") == "db:jan_discord")
     boardjan._SNAP.update(t=0.0, snap=None)
     net2 = FakeNet()
     d2 = polboards.Discord("jan", hook, os.path.join(tmp, "w.json"), opener=net2)
@@ -348,7 +360,17 @@ def discord_checks(tmp, boardjan, polboards):
           [c[0] for c in net2.calls] == ["POST"], [c[0] for c in net2.calls])
 
 
+def snapshot_rows():
+    """The rank snapshot as stored: (category, order, updated_at) per row."""
+    import janstore
+    janstore.ensure_schema()
+    return [(r["category"], r["data"], r["updated_at"]) for r in janstore.db.query(
+        "SELECT category, data, updated_at FROM jan_rank_snapshot ORDER BY category")]
+
+
 def main():
+    if janpg.fresh_database() is None:
+        return janpg.skip_or_fail("jan_board_test")
     tmp = tempfile.mkdtemp(prefix="boardjan-")
     res = os.path.join(tmp, "resources")
     os.makedirs(res)
@@ -394,13 +416,14 @@ def main():
           all(r["move"] == "new" and r["prev"] is None for r in rating))
     check("accounts.db is byte-identical after reading names (read-only URI)",
           _sha(db) == db_before)
-    snap_path = os.path.join(res, janstats.RANK_SNAPSHOT)
     check("the board NEVER writes the rank snapshot the client's glyph uses",
-          not os.path.exists(snap_path))
+          snapshot_rows() == [])
 
     print("movement")
     janstats.rank_list(0)                       # the GAME's call: remembers
-    before = _sha(snap_path)
+    before = snapshot_rows()
+    check("the game's own call remembers the order", [c for c, _o, _t in before] == ["0"]
+          and before[0][1] == [1, 2], before)
     with open(os.path.join(res, "2.jan_stats.json"), "w") as fh:
         json.dump({"games_played": 7, "places": [4, 2, 1, 0], "result_x10": 1200}, fh)
     boardjan._SNAP.update(t=0.0, snap=None)
@@ -409,7 +432,7 @@ def main():
           [(r["name"], r["move"], r["prev"]) for r in rating]
           == [("Quinn", "up", 2), ("Lex", "down", 1)], rating)
     check("...and the snapshot is still the game's, untouched by the board",
-          _sha(snap_path) == before)
+          snapshot_rows() == before)
     check("move_of: same / new", boardjan.move_of(3, 3) == "same"
           and boardjan.move_of(255, 0) == "new")
     check("winnings are whole JAN, floats only for rating and title score",
@@ -609,4 +632,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

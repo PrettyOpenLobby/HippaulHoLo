@@ -28,13 +28,12 @@ Measured 2026-09-21 against the 2004 module (base 0x00280000):
 So running an event is: decide the window, tell the client the flag is 1
 inside it, and count what players win while it is open.
 
-    POL_JAN_EVENT       path to the record (default <resources>/janevent.json)
+    The record is the 'current' row of the jan_event table (PostgreSQL,
+    through janstore; it was the file <resources>/janevent.json).
     POL_JAN_EVENT_ID    override the id    POL_JAN_EVENT_NAME  override the name
     POL_JAN_EVENT_OPEN / POL_JAN_EVENT_CLOSE  unix seconds, override the window
     POL_JAN_EVENT_FORCE 1 = always running, 0 = never (default: the window)
 """
-import io
-import json
 import os
 import time
 
@@ -46,25 +45,42 @@ import time
 NAME_LEN = 64
 
 
+#: The jan_event row the server uses. The self-test points it at a row of its
+#: own for the length of the test.
+_ROW = "current"
+#: record() is asked on every ranking fetch and event-window lookup; the row
+#: is read at most once per _RECORD_TTL_S in a process (store() refreshes it
+#: at once), which is as fresh as the hourly scheduler needs.
+_RECORD_TTL_S = 5.0
+_RECORD_CACHE = {"row": None, "at": 0.0, "rec": {}}
+
+
 def event_file():
+    """Where the record is kept, for the command line's report."""
     try:
-        import janstats
-        root = janstats.stats_dir()
-    except Exception:                                       # pragma: no cover
-        root = os.environ.get("POL_RESOURCE_DIR") or os.path.join(
-            os.environ.get("POL_DATA_DIR", "/data"), "resources")
-    return os.environ.get("POL_JAN_EVENT", os.path.join(root, "janevent.json"))
+        import janstore
+        return "jan_event row %r in %s" % (_ROW, janstore.where())
+    except Exception:                                       # noqa: BLE001
+        return "jan_event row %r" % (_ROW,)
 
 
 def record():
-    """The stored event, or {}. Never raises: a missing or broken file simply
-    means no event, which is the safe answer."""
+    """The stored event, or {}. Never raises: a missing row, or a database
+    that cannot be reached, simply means no event, which is the safe answer."""
+    now = time.monotonic()
+    c = _RECORD_CACHE
+    if c["row"] == _ROW and now - c["at"] < _RECORD_TTL_S:
+        return dict(c["rec"])
     try:
-        with io.open(event_file(), encoding="utf-8") as f:
-            rec = json.load(f)
-        return rec if isinstance(rec, dict) else {}
-    except (OSError, ValueError):
+        import janstore
+        janstore.ensure_schema()
+        row = janstore.db.query_one("SELECT data FROM jan_event WHERE name = %s",
+                                    (_ROW,))
+        rec = dict(row["data"]) if row and isinstance(row["data"], dict) else {}
+    except Exception:                                       # noqa: BLE001
         return {}
+    _RECORD_CACHE.update(row=_ROW, at=now, rec=rec)
+    return dict(rec)
 
 
 def store(event_id, name="", opens_at=None, closes_at=None, auto=False):
@@ -80,14 +96,13 @@ def store(event_id, name="", opens_at=None, closes_at=None, auto=False):
            "opens_at": None if opens_at is None else int(opens_at),
            "closes_at": None if closes_at is None else int(closes_at),
            "auto": bool(auto)}
-    path = event_file()
-    d = os.path.dirname(path)
-    if d and not os.path.isdir(d):
-        os.makedirs(d)
-    tmp = path + ".tmp"
-    with io.open(tmp, "w", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False, indent=2))
-    os.replace(tmp, path)
+    import janstore
+    janstore.ensure_schema()
+    janstore.db.execute(
+        "INSERT INTO jan_event (name, data) VALUES (%s, %s::jsonb)"
+        " ON CONFLICT (name) DO UPDATE SET data = EXCLUDED.data, updated_at = now()",
+        (_ROW, janstore.jsonb(rec)))
+    _RECORD_CACHE.update(row=_ROW, at=time.monotonic(), rec=dict(rec))
     return rec
 
 
@@ -103,7 +118,7 @@ def _window(rec, now):
 def current(now=None):
     """The event that is RUNNING right now, or None.
 
-    The environment wins over the file, so a server owner can open one without
+    The environment wins over the store, so a server owner can open one without
     touching the store -- the same shape every other knob in this service has.
     """
     force = os.environ.get("POL_JAN_EVENT_FORCE")
@@ -157,7 +172,7 @@ def name_bytes(now=None):
 # The calendar hands back one event at a time, a holiday before the weekend.
 #
 # A scheduled job runs `janevent.py --rotate` hourly (a cron entry or a
-# systemd timer that execs it where the resource directory is writable).
+# systemd timer that execs it in a container with the stack's POL_DATABASE_URL).
 # `auto_rotate` is idempotent -- it opens
 # the window it is inside, closes one it has left, and does nothing the rest of
 # the time. A missed run costs at most an hour of the window, never a duplicate
@@ -235,6 +250,13 @@ def selftest():
              "POL_JAN_EVENT_OPEN", "POL_JAN_EVENT_CLOSE")}
     for k in keep:
         os.environ.pop(k, None)
+    import uuid
+    global _calendar, _ROW
+    _keep_row = _ROW
+    # a row of the test's own, empty to start with: the live 'current' row is
+    # never read or written, so the test sees an unset store wherever it runs
+    _ROW = "selftest-" + uuid.uuid4().hex
+    _RECORD_CACHE.update(row=None, at=0.0, rec={})
     try:
         os.environ["POL_JAN_EVENT_FORCE"] = "0"
         check(current() is None and event_id() == 0,
@@ -263,11 +285,7 @@ def selftest():
         for k in ("POL_JAN_EVENT_OPEN", "POL_JAN_EVENT_CLOSE",
                   "POL_JAN_EVENT_NAME"):
             os.environ.pop(k, None)
-        import tempfile
-        global _calendar
-        _keep_res = os.environ.get("POL_RESOURCE_DIR")
         _keep_cal = _calendar
-        os.environ["POL_RESOURCE_DIR"] = tempfile.mkdtemp()
         # A stand-in for eventcal, so this tests the rotation and not the
         # calendar's data: the weekend rule, plus one holiday that starts on a
         # Saturday a month on and so lands inside that weekend's window.
@@ -347,11 +365,14 @@ def selftest():
                   "after it the tab goes dark until the calendar opens one")
         finally:
             _calendar = _keep_cal
-            if _keep_res is None:
-                os.environ.pop("POL_RESOURCE_DIR", None)
-            else:
-                os.environ["POL_RESOURCE_DIR"] = _keep_res
     finally:
+        try:
+            import janstore
+            janstore.db.execute("DELETE FROM jan_event WHERE name = %s", (_ROW,))
+        except Exception:                                   # noqa: BLE001
+            pass
+        _ROW = _keep_row
+        _RECORD_CACHE.update(row=None, at=0.0, rec={})
         for k, v in keep.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -381,6 +402,9 @@ def main():
                     help="open or close the scheduled event (what the timer runs)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
+    if a.rotate or a.close or a.open or a.selftest:
+        import janstore
+        janstore.migrate_at_start("janevent")
     if a.selftest:
         raise SystemExit(0 if selftest() else 1)
     if a.rotate:
@@ -404,12 +428,12 @@ def main():
         print("  until %s" % (time.strftime("%Y-%m-%d %H:%M UTC",
                                             time.gmtime(closes))
                               if closes else "closed by hand"))
-        print("  file %s" % event_file())
+        print("  kept in %s" % event_file())
         return
     cur = current()
     print("stored: %r" % (record() or None))
     print("running now: %s" % ("yes, id %s" % cur["id"] if cur else "no"))
-    print("file: %s" % event_file())
+    print("kept in: %s" % event_file())
 
 
 if __name__ == "__main__":

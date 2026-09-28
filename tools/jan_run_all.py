@@ -10,6 +10,14 @@ not exist. Suites marked `core` exercise the seam with the OpenLobby core and
 need it beside this tree (see jan_testenv.py); they are skipped, loudly, when
 it is not found. The last entries run the core's own suites WITH this title
 loaded, so their content-3 sections stop skipping.
+
+Every suite imports OpenLobby's polcore (janstore.py), so the core has to be
+found for any of them. Suites listed in NEEDS_DB each get a fresh, empty
+PostgreSQL database (janpg.py, over OpenLobby's tools/pgtest.py), dropped when
+the suite ends; with no server they SKIP, or FAIL under POL_TEST_REQUIRE_DB=1.
+No suite ever sees a POL_DATABASE_URL or POL_VALKEY_URL from the environment
+it was started in: live state is each suite's own in-memory store unless the
+suite starts a Valkey of its own.
 """
 import argparse
 import os
@@ -60,6 +68,8 @@ SUITES = [
     # --- the seam with the core -------------------------------------------
     ("jan_title",     [PY, "jan_title_test.py"],               HERE,     True),
     ("jan_delta_e2e", [PY, "jan_delta_e2e.py"],                HERE,     True),
+    # --- the state outside the process: PostgreSQL tables and Valkey keys ----
+    ("jan_store",     [PY, "jan_store_test.py"],               HERE,     True),
     # the core's own suites, with this title loaded
     ("core_resource", [PY, os.path.join(CORE_TOOLS, "resource_test.py")],
                       CORE_TOOLS, True),
@@ -70,6 +80,26 @@ SUITES = [
     ("core_titlezone", [PY, os.path.join(CORE_TOOLS, "titlezone_test.py")],
                       CORE_TOOLS, True),
 ]
+
+
+#: suites that get a fresh PostgreSQL database of their own (see the docstring):
+#: the ones that keep Janhourou's durable state (the event record, the rank
+#: snapshot, the board's bookkeeping), and the core's suites whose accounts
+#: live in PostgreSQL too
+NEEDS_DB = {"janevent", "janstats", "jan_board", "jan_store",
+            "core_resource", "core_content_profile"}
+
+
+def _fresh_database():
+    """(url, drop) for a new empty database, or (None, why)."""
+    try:
+        import janpg
+        if not janpg.server_available():
+            return None, "no PostgreSQL server (Docker, or POL_TEST_DATABASE_URL)"
+        url = janpg.pgtest.create_database()
+        return url, lambda: janpg.pgtest.drop_database(url)
+    except Exception as exc:                                  # noqa: BLE001
+        return None, "no test database (%s)" % exc
 
 
 def main():
@@ -83,6 +113,8 @@ def main():
         [p for p in (SERVICES, CORE, env.get("PYTHONPATH", "")) if p])
     env["POL_TITLES"] = "jantitle"
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    for k in ("POL_DATABASE_URL", "POL_VALKEY_URL", "JAN_TEST_DATABASE"):
+        env.pop(k, None)
     failed, skipped = [], []
     print(f"running {len(todo)} suite(s); core: {CORE or 'NOT FOUND'}")
     for name, cmd, cwd, needs_core in todo:
@@ -90,14 +122,32 @@ def main():
             print("  %-22s ... SKIP  (no OpenLobby core beside this tree)" % name)
             skipped.append(name)
             continue
+        suite_env, drop = env, None
+        if name in NEEDS_DB:
+            url, drop = _fresh_database()
+            if url is None:
+                if os.environ.get("POL_TEST_REQUIRE_DB") == "1":
+                    print("  %-22s ... FAIL  (%s, POL_TEST_REQUIRE_DB=1)" % (name, drop))
+                    failed.append(name)
+                else:
+                    print("  %-22s ... SKIP  (%s)" % (name, drop))
+                    skipped.append(name)
+                continue
+            suite_env = dict(env, POL_DATABASE_URL=url, JAN_TEST_DATABASE="1")
         t0 = time.time()
         try:
-            r = subprocess.run(cmd, cwd=cwd, env=env, timeout=600,
+            r = subprocess.run(cmd, cwd=cwd, env=suite_env, timeout=600,
                                capture_output=not args.v, text=True,
                                encoding="utf-8", errors="replace")
             ok = r.returncode == 0
         except subprocess.TimeoutExpired:
             ok, r = False, None
+        finally:
+            if drop is not None:
+                try:
+                    drop()
+                except Exception:                             # noqa: BLE001
+                    pass
         print("  %-22s ... %s %6.1fs" % (name, "ok  " if ok else "FAIL",
                                          time.time() - t0), flush=True)
         if not ok:
