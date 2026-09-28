@@ -376,10 +376,18 @@ def main():
     recs = {1: {"games_played": 4, "places": [3, 1, 0, 0], "result_x10": 800},
             2: {"games_played": 6, "places": [1, 2, 2, 1], "result_x10": -150},
             3: {"games_played": 0}}
-    for m, r in recs.items():
-        with open(os.path.join(res, "%d.jan_stats.json" % m), "w") as fh:
-            json.dump(r, fh)
     import janstats
+    from polcore import blobs
+
+    def put_record(m, r):
+        """A stored record as janstats keeps it (see janstats.STATS_PATH)."""
+        blobs.put(str(m), janstats.STATS_PATH, json.dumps(r).encode("utf-8"))
+
+    def get_record(m):
+        return json.loads(blobs.get(str(m), janstats.STATS_PATH))
+
+    for m, r in recs.items():
+        put_record(m, r)
     import boardjan
     import polboards
 
@@ -412,8 +420,7 @@ def main():
     before = snapshot_rows()
     check("the game's own call remembers the order", [c for c, _o, _t in before] == ["0"]
           and before[0][1] == [1, 2], before)
-    with open(os.path.join(res, "2.jan_stats.json"), "w") as fh:
-        json.dump({"games_played": 7, "places": [4, 2, 1, 0], "result_x10": 1200}, fh)
+    put_record(2, {"games_played": 7, "places": [4, 2, 1, 0], "result_x10": 1200})
     boardjan._SNAP.update(t=0.0, snap=None)
     rating = boardjan.snapshot()["categories"][0]["rows"]
     check("Quinn overtakes Lex: up for Quinn, down for Lex",
@@ -431,12 +438,9 @@ def main():
     for m, hist in ((1, [{"place": 1, "result_x10": 29, "score": 22900, "t": 1500, "table": 2}]),
                     (2, [{"place": 0, "result_x10": 469, "score": 36900, "t": 2000, "table": 1},
                          {"place": 3, "result_x10": -200, "score": 9000, "t": 1000, "table": 1}])):
-        p = os.path.join(res, "%d.jan_stats.json" % m)
-        with open(p) as fh:
-            r = json.load(fh)
+        r = get_record(m)
         r["history"] = hist
-        with open(p, "w") as fh:
-            json.dump(r, fh)
+        put_record(m, r)
     rg = boardjan.snapshot()["recent"]
     check("recent games are newest first, across players, with names and signed results",
           [(g["name"], g["place"], g["result"], g["t"]) for g in rg]

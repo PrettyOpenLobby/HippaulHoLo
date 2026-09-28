@@ -63,12 +63,10 @@ def selftest(trace=False):
 
     knobs.DEAL_DELAY = 0.0          # never sleep on the deal during the selftest
 
-    # Persistence is exercised for real, but NEVER against the deployed resource
-    # directory: the member ids below are test ids and would litter it with
-    # records for players who do not exist.
-    import tempfile
-    _old_res = os.environ.get("POL_RESOURCE_DIR")
-    os.environ["POL_RESOURCE_DIR"] = tempfile.mkdtemp(prefix="jangame-")
+    # Persistence is exercised for real, but NEVER against a deployed
+    # database: the member ids below are test ids and would litter it with
+    # records for players who do not exist. jan_run_all.py gives this suite a
+    # throwaway database of its own.
 
     # The side-bet handshake changes what READY answers (START, not the
     # deal); the legacy tests assume the deal. The sashiuma block below
@@ -649,7 +647,7 @@ def selftest(trace=False):
         ok &= check(sum(rec["places"]) == 1 and len(rec["history"]) == 1,
                     "exactly one placing stored: %r" % (rec["places"],))
         for s in sorted(t.bots):
-            ok &= check(not os.path.exists(janstats.stats_file(t.seats[s])),
+            ok &= check(not janstats.stats_exists(t.seats[s]),
                         "bot seat %d was NOT recorded -- its id is non-zero by "
                         "design and must not read as a person" % s)
         ok &= check(t._recorded, "the table knows it has recorded")
@@ -3037,10 +3035,6 @@ def selftest(trace=False):
         os.environ["POL_JAN_SEATS"] = _old_seats_env
 
     print("\n%s" % ("selftest OK" if ok else "SELFTEST FAILED"))
-    if _old_res is None:
-        os.environ.pop("POL_RESOURCE_DIR", None)
-    else:
-        os.environ["POL_RESOURCE_DIR"] = _old_res
     return 0 if ok else 1
 
 
