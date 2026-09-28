@@ -3,7 +3,7 @@
 that looks like the game (2026-09-12).
 
 The shape decided for it:
-  * its OWN container, reading /data (accounts.db included) READ-ONLY --
+  * its OWN container, reading /data and the account database READ-ONLY --
     never inside a game server, so a bug in a leaderboard can never touch a
     live session, and nothing here ever writes game data;
   * ONE SUBDOMAIN PER GAME -- jan.example.com, tm.example.com,
