@@ -280,7 +280,7 @@ def selftest():
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             os.environ["POL_JAN_SEATS"] = "1"
-            os.environ["POL_JAN_SEATS_FILE"] = os.path.join(td, "seats.json")
+            os.environ["POL_JAN_SEATS_KEY"] = "jan:test:%s:seats" % os.path.basename(td)
             janseats._TABLES.clear()
             janseats._ADOPTED[0] = True
             janseats._OWNER[0] = True
@@ -420,7 +420,7 @@ def selftest():
 
             # MjTBLCONFALL: the rules are STORED before the ack
             if janrules is not None:
-                os.environ["POL_JAN_RULES_FILE"] = os.path.join(td, "rules.json")
+                os.environ["POL_JAN_RULES_KEY"] = "jan:test:%s:rules" % os.path.basename(td)
                 janrules._TABLES.clear()
                 janrules._ADOPTED[0] = True
                 janrules._OWNER[0] = True
@@ -448,8 +448,8 @@ def selftest():
                 janrules._TABLES.clear()
                 janrules._ADOPTED[0] = False
                 janrules._OWNER[0] = False
-                janrules._CACHE["mtime"] = -1.0
-                os.environ.pop("POL_JAN_RULES_FILE", None)
+                janrules._SHARED.forget()
+                os.environ.pop("POL_JAN_RULES_KEY", None)
 
             # MjGALLEYREQ with POL_JAN_GALLERY off: refused with 7, the dialog
             # closes; a LEAVEREQ from a member in no gallery: 6 (the other code
@@ -672,7 +672,7 @@ def selftest():
                 ok = False
             # the rules: one MjTBLCONFALL per room, keyed by composite
             if janrules is not None:
-                os.environ["POL_JAN_RULES_FILE"] = os.path.join(td, "rules2.json")
+                os.environ["POL_JAN_RULES_KEY"] = "jan:test:%s:rules2" % os.path.basename(td)
                 janrules._TABLES.clear()
                 janrules._ADOPTED[0] = True
                 janrules._OWNER[0] = True
@@ -946,8 +946,8 @@ def selftest():
                 janrules._TABLES.clear()
                 janrules._ADOPTED[0] = False
                 janrules._OWNER[0] = False
-                janrules._CACHE["mtime"] = -1.0
-                os.environ.pop("POL_JAN_RULES_FILE", None)
+                janrules._SHARED.forget()
+                os.environ.pop("POL_JAN_RULES_KEY", None)
             # without a registry the wire id is room 0's -- the v1 behaviour
             seating.LIVE_ROOMS = None
             if seating._table_for(8, 1) != _t101 or seating._table_for(4242, 1) != 1:
@@ -962,9 +962,9 @@ def selftest():
             janseats._DELTAS.clear(); janseats._ROWS.clear(); janseats._SEQ.clear()
             janseats._OWNER[0] = False
             janseats._ADOPTED[0] = False
-            janseats._CACHE["mtime"] = -1.0
+            janseats._SHARED.forget()
             os.environ.pop("POL_JAN_SEATS", None)
-            os.environ.pop("POL_JAN_SEATS_FILE", None)
+            os.environ.pop("POL_JAN_SEATS_KEY", None)
 
     srv.shutdown()
     print("\n%s" % ("selftest OK" if ok else "SELFTEST FAILED"))

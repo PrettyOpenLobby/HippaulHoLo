@@ -67,7 +67,10 @@ listed in `ENGINE_UNMAPPED` so the gap is visible, not silent).
 
     POL_JAN_RULES=0          kill switch: parse+store become no-ops, every
                              table plays and serves the defaults
-    POL_JAN_RULES_FILE       default $POL_DATA_DIR/jan-rules.json
+    POL_JAN_RULES_KEY        default jan:rules, the Valkey key the rule sets
+                             are published under (janstore.Snapshot; it was
+                             the file $POL_DATA_DIR/jan-rules.json). Live
+                             state, like the seats they belong to.
 
 === THE KEY IS THE COMPOSITE TABLE ID (audit finding 30, 2026-09-04) =======
 
@@ -86,6 +89,7 @@ import sys
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import janstore                                                 # noqa: E402
 try:
     import janlobby                                             # noqa: E402
 except ImportError:                                             # pragma: no cover
@@ -136,9 +140,7 @@ _LOCK = threading.RLock()
 _TABLES = {}                    # table id (str) -> {"values": {name: int}, ...}
 _OWNER = [False]
 _ADOPTED = [False]
-_CACHE = {"mtime": -1.0, "data": {}}
-_FILE_DEFAULT = os.path.join(os.environ.get("POL_DATA_DIR", "/data"),
-                             "jan-rules.json")
+_SHARED = janstore.Snapshot(janstore.rules_key())
 
 
 def enabled():
@@ -146,27 +148,20 @@ def enabled():
 
 
 def _path():
-    return os.environ.get("POL_JAN_RULES_FILE", _FILE_DEFAULT)
+    """The live key the rule sets are published under."""
+    return janstore.rules_key()
 
 
 def _read_file():
-    try:
-        mtime = os.stat(_path()).st_mtime
-    except OSError:
-        return {}
-    if mtime != _CACHE["mtime"]:
-        try:
-            with open(_path(), "r", encoding="utf-8") as f:
-                _CACHE["data"] = json.load(f) or {}
-            _CACHE["mtime"] = mtime
-        except (OSError, ValueError):
-            return _CACHE["data"]           # torn write: last good view stands
-    return _CACHE["data"]
+    """The published rules document ({} when there is none)."""
+    _SHARED.key = _path()
+    return _SHARED.read()
 
 
 def _adopt():
-    """Seed memory from the file before the first write (setdefault, never
-    overwrite) so a restart cannot publish emptiness over a table's rules."""
+    """Seed memory from the published document before the first write
+    (setdefault, never overwrite) so a restart cannot publish emptiness over a
+    table's rules."""
     if _ADOPTED[0]:
         return
     _ADOPTED[0] = True
@@ -178,17 +173,12 @@ def _adopt():
 def _publish():
     _OWNER[0] = True
     try:
-        p = _path()
-        d = os.path.dirname(p)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        tmp = p + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"tables": _TABLES}, f, sort_keys=True)
-        os.replace(tmp, p)                  # atomic
-        _CACHE["mtime"] = -1.0
-    except OSError:
-        pass                                # memory still serves this process
+        with _LOCK:
+            doc = json.loads(json.dumps({"tables": _TABLES}))
+        _SHARED.key = _path()
+        _SHARED.write(doc)
+    except Exception as exc:                # noqa: BLE001 -- Valkey away
+        janstore._whine("publishing the table rules", exc)   # memory still serves
 
 
 def _live_tables():
@@ -498,11 +488,11 @@ def selftest():
     # --- the store, across the container split --------------------------
     with tempfile.TemporaryDirectory() as td:
         os.environ["POL_JAN_RULES"] = "1"
-        os.environ["POL_JAN_RULES_FILE"] = os.path.join(td, "rules.json")
+        os.environ["POL_JAN_RULES_KEY"] = "jan:test:%s:rules" % os.path.basename(td)
         _TABLES.clear()
         _ADOPTED[0] = False
         _OWNER[0] = False
-        _CACHE["mtime"] = -1.0
+        _SHARED.forget()
         check("a fresh table serves the defaults",
               values_for(2) == default_values() and not has_rules(2))
         store(2, p)
@@ -517,7 +507,7 @@ def selftest():
         saved = dict(_TABLES)
         _TABLES.clear()
         _OWNER[0] = False
-        _CACHE["mtime"] = -1.0
+        _SHARED.forget()
         check("a reader process sees the published rules", values_for(2)["UMA"] == 4)
         # a restarted writer adopts rather than wipes
         _ADOPTED[0] = False
@@ -549,11 +539,11 @@ def selftest():
         check("POL_JAN_RULES=0 serves the defaults whatever is stored",
               values_for(3) == default_values())
         os.environ.pop("POL_JAN_RULES", None)
-        os.environ.pop("POL_JAN_RULES_FILE", None)
+        os.environ.pop("POL_JAN_RULES_KEY", None)
         _TABLES.clear()
         _ADOPTED[0] = False
         _OWNER[0] = False
-        _CACHE["mtime"] = -1.0
+        _SHARED.forget()
 
     check("describe() renders", "genten" in describe(p))
     print("\n%s" % ("ALL OK" if ok else "FAILURES ABOVE"))

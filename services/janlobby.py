@@ -536,7 +536,9 @@ def member_room_id(live, member_id):
 #
 # The map is a cache of an OBSERVATION, so a wrong entry self-corrects the next
 # time that room is entered, and an empty map degrades to exactly today's
-# behaviour (ANY_ROOM, every Jan room's occupants).
+# behaviour (ANY_ROOM, every Jan room's occupants). It is kept in the Valkey hash
+# `jan:room-keys` (janstore.roomkey_key; it was the file
+# `<POL_DATA_DIR>/jan-room-keys.json`): live state, re-observed after a loss.
 _KEYMAP = {}                    # "key" -> channel
 _KEY_PENDING = {}               # member id -> (key, first seen)
 _KEYMAP_LOADED = [False]
@@ -544,10 +546,9 @@ KEY_BIND_WINDOW_S = 120.0
 
 
 def _keymap_path():
-    return os.environ.get(
-        "POL_JAN_ROOMKEY_FILE",
-        os.path.join(os.environ.get("POL_DATA_DIR", "/data"),
-                     "jan-room-keys.json"))
+    """The live hash the key -> channel map is kept in."""
+    import janstore
+    return janstore.roomkey_key()
 
 
 def _keymap_load():
@@ -555,26 +556,19 @@ def _keymap_load():
         return
     _KEYMAP_LOADED[0] = True
     try:
-        import json
-        with open(_keymap_path(), "r", encoding="utf-8") as f:
-            for k, v in (json.load(f) or {}).items():
-                _KEYMAP[str(k)] = str(v)
-    except (OSError, ValueError):
+        import janstore
+        for k, v in (janstore.kv.hgetall(_keymap_path()) or {}).items():
+            _KEYMAP[str(k)] = str(v)
+    except Exception:                       # noqa: BLE001 -- Valkey away: ANY_ROOM
         pass
 
 
 def _keymap_save():
     try:
-        import json
-        path = _keymap_path()
-        d = os.path.dirname(path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_KEYMAP, f)
-        os.replace(tmp, path)
-    except OSError:
+        import janstore
+        if _KEYMAP:
+            janstore.kv.hset(_keymap_path(), mapping=dict(_KEYMAP))
+    except Exception:                       # noqa: BLE001 -- Valkey away
         pass
 
 
@@ -1517,7 +1511,7 @@ def _crosscheck_tools():
 def selftest():
     ok = True
     # The blob checks below must count from `live` alone, not from whatever a
-    # real /data/jan-seats.json on this machine happens to hold.
+    # real published seats (janseats, in this process's live store) happen to hold.
     os.environ["POL_JAN_SEATS"] = "0"
 
     def check(name, cond):
@@ -1728,7 +1722,7 @@ def selftest():
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             os.environ["POL_JAN_SEATS"] = "1"
-            os.environ["POL_JAN_SEATS_FILE"] = os.path.join(td, "seats.json")
+            os.environ["POL_JAN_SEATS_KEY"] = "jan:test:%s:seats" % os.path.basename(td)
             janseats._TABLES.clear()
             janseats._ADOPTED[0] = True     # empty store, do not adopt disk
             janseats._OWNER[0] = True
@@ -1746,9 +1740,9 @@ def selftest():
             janseats._TABLES.clear()
             janseats._OWNER[0] = False
             janseats._ADOPTED[0] = False
-            janseats._CACHE["mtime"] = -1.0
+            janseats._SHARED.forget()
             os.environ["POL_JAN_SEATS"] = "0"
-            os.environ.pop("POL_JAN_SEATS_FILE", None)
+            os.environ.pop("POL_JAN_SEATS_KEY", None)
     else:
         print("%-58s %s" % ("seat-store merge", "skipped (no janseats)"))
     os.environ.pop("POL_JAN_SEATS", None)
@@ -1804,7 +1798,7 @@ def selftest():
 
     # --- THE ROOM KEY IS LEARNED, NOT DECODED ------------------------------
     import tempfile as _tf
-    os.environ["POL_JAN_ROOMKEY_FILE"] = os.path.join(_tf.mkdtemp(), "rk.json")
+    os.environ["POL_JAN_ROOMKEY_KEY"] = "jan:test:%s:rk" % os.path.basename(_tf.mkdtemp())
     _KEYMAP.clear(); _KEY_PENDING.clear(); _KEYMAP_LOADED[0] = False
     _LIVEKEY = 0x3d7c0054cc          # a real key off the wire, 2026-09-04
     _room1 = all_rooms()[0].channel
@@ -1831,7 +1825,7 @@ def selftest():
     check("the learned map survives a reload",
           (_KEYMAP_LOADED.__setitem__(0, False) or _KEYMAP.clear()
            or room_for_key(_LIVEKEY) is not None))
-    os.environ.pop("POL_JAN_ROOMKEY_FILE", None)
+    os.environ.pop("POL_JAN_ROOMKEY_KEY", None)
     _KEYMAP.clear(); _KEY_PENDING.clear(); _KEYMAP_LOADED[0] = False
 
     check("an unknown table id has no delta row",
@@ -1894,7 +1888,7 @@ def selftest():
         import tempfile as _tf2
         with _tf2.TemporaryDirectory() as td:
             os.environ["POL_JAN_SEATS"] = "1"
-            os.environ["POL_JAN_SEATS_FILE"] = os.path.join(td, "seats.json")
+            os.environ["POL_JAN_SEATS_KEY"] = "jan:test:%s:seats" % os.path.basename(td)
             janseats._TABLES.clear()
             janseats._ADOPTED[0] = True
             janseats._OWNER[0] = True
@@ -1913,9 +1907,9 @@ def selftest():
             janseats._TABLES.clear()
             janseats._OWNER[0] = False
             janseats._ADOPTED[0] = False
-            janseats._CACHE["mtime"] = -1.0
+            janseats._SHARED.forget()
             os.environ["POL_JAN_SEATS"] = "0"
-            os.environ.pop("POL_JAN_SEATS_FILE", None)
+            os.environ.pop("POL_JAN_SEATS_KEY", None)
     _who = [Occupant("PS2Tester", 8, profile_id=1000000803)]
     _p = ptl_blob(_who, {})
     check("PTL member row +0x18 = the Jan Content ID View Profile sends",
@@ -1946,7 +1940,7 @@ def selftest():
         import tempfile as _tf3
         with _tf3.TemporaryDirectory() as td:
             os.environ["POL_JAN_SEATS"] = "1"
-            os.environ["POL_JAN_SEATS_FILE"] = os.path.join(td, "seats.json")
+            os.environ["POL_JAN_SEATS_KEY"] = "jan:test:%s:seats" % os.path.basename(td)
             janseats._TABLES.clear(); janseats._DELTAS.clear()
             janseats._ROWS.clear(); janseats._SEQ.clear()
             janseats._ADOPTED[0] = True
@@ -2028,9 +2022,9 @@ def selftest():
             janseats._ROWS.clear(); janseats._SEQ.clear()
             janseats._OWNER[0] = False
             janseats._ADOPTED[0] = False
-            janseats._CACHE["mtime"] = -1.0
+            janseats._SHARED.forget()
             os.environ["POL_JAN_SEATS"] = "0"
-            os.environ.pop("POL_JAN_SEATS_FILE", None)
+            os.environ.pop("POL_JAN_SEATS_KEY", None)
     os.environ.pop("POL_JAN_SEATS", None)
 
     print("\n%s" % ("ALL OK" if ok else "FAILURES ABOVE"))

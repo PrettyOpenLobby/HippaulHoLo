@@ -2,6 +2,7 @@
 import os
 import threading
 import time
+import janstore
 import janwire                                                      # noqa: E402
 import janmsgs as M                                                 # noqa: E402
 from .deps import janrules, janseats
@@ -550,8 +551,9 @@ class Manager(object):
             pass                                    # never touch a game over it
 
     def _write_watch(self, force=False):
-        """WATCH_FILE, atomically, when the tables changed or WATCH_EVERY_S
-        passed. Never raises: a failed write must not touch a game."""
+        """The watch document (the WATCH_FILE key), in one SET, when the
+        tables changed or WATCH_EVERY_S passed. Never raises: a failed write
+        must not touch a game."""
         if not knobs.WATCH_FILE or knobs.WATCH_FILE == "0":
             return
         try:
@@ -561,16 +563,13 @@ class Manager(object):
             if not force and body == self._watch_last[0] and \
                     now - self._watch_last[1] < knobs.WATCH_EVERY_S:
                 return
-            path = os.path.join(os.environ.get("POL_DATA_DIR", "/data"), knobs.WATCH_FILE)
-            tmp = "%s.tmp.%d" % (path, os.getpid())
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write('{"stamp":%.3f,"tables":%s}' % (now, body))
-            os.replace(tmp, path)
+            janstore.kv.set(knobs.WATCH_FILE, '{"stamp":%.3f,"tables":%s}' % (now, body),
+                            ttl=knobs.WATCH_TTL_S)
             self._watch_last = (body, now)
         except Exception as e:                      # noqa: BLE001
             if time.time() - self._watch_err > 300:
                 self._watch_err = time.time()
-                narration._trace("watch file not written (%s: %s) -- games unaffected"
+                narration._trace("watch document not written (%s: %s) -- games unaffected"
                        % (type(e).__name__, e))
 
     @staticmethod

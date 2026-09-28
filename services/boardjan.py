@@ -15,7 +15,7 @@ page and the game can never disagree about who is where.
 TWO THINGS THIS MODULE MUST NEVER DO, both of which the obvious call does:
 
   * write the rank snapshot. `rank_list(..., remember=True)` (its default)
-    rewrites jan-rank-snapshot.json, which is what the client's up/down/New
+    rewrites janstats.RANK_SNAPSHOT, which is what the client's up/down/New
     glyph compares against. A page polled every few seconds would reset every
     player's movement to "no change". Always `remember=False`.
   * open accounts.db through `accounts.connect()`. That applies the schema --
@@ -35,6 +35,7 @@ import threading
 import time
 
 import janstats
+import janstore
 
 NAME = "jan"
 TITLE = "JongHoLow - Rankings"
@@ -220,17 +221,19 @@ def live_games(now=None):
 # the live state. A table whose watching is switched off disappears at once,
 # history and all; a stale file (jan down) means no tables.
 # ---------------------------------------------------------------------------
-TABLES_FILE = "jan-tables-live.json"
 WATCH_DELAY = float(os.environ.get("POL_BOARDS_JAN_WATCH_DELAY", "30") or 30)
 WATCH_STALE_S = 120.0           # no rewrite for this long = the writer is gone
 WATCH_KEEP_S = 90.0             # history kept beyond the delay
 
 
 class Watch:
-    """The delayed view of jangame's live tables file. Thread-safe."""
+    """The delayed view of jangame's live tables document (Valkey
+    `jan:tables-live`, janstore.watch_key; it was the file
+    <POL_DATA_DIR>/jan-tables-live.json). Thread-safe. `key` names another
+    key (the tests)."""
 
-    def __init__(self, path=None, delay=None, clock=time.time):
-        self.path = path
+    def __init__(self, key=None, delay=None, clock=time.time):
+        self.key = key
         self.delay = WATCH_DELAY if delay is None else float(delay)
         self.clock = clock
         self.hist = {}          # table id -> [(t, state or None when it ended)]
@@ -239,18 +242,26 @@ class Watch:
         self._last_err = 0.0
 
     def file(self):
-        return self.path or os.path.join(os.environ.get("POL_DATA_DIR", "/data"), TABLES_FILE)
+        """The key the document is read from, or None when watching is off."""
+        return self.key or janstore.watch_key()
 
     def _read(self, now):
-        """{table id: entry} from the file now, or {} when it is missing or
-        stale. An entry is {"watchable": bool, "state": {...}}."""
+        """{table id: entry} from the document now, or {} when it is missing
+        or stale. An entry is {"watchable": bool, "state": {...}}."""
         try:
-            with open(self.file(), encoding="utf-8") as fh:
-                d = json.load(fh) or {}
+            key = self.file()
+            raw = janstore.kv.get(key) if key else None
+            d = json.loads(raw) if raw else {}
             if not 0 <= now - float(d.get("stamp") or 0) < WATCH_STALE_S:
                 return {}
             return {str(k): v for k, v in (d.get("tables") or {}).items() if isinstance(v, dict)}
         except (OSError, ValueError, TypeError, AttributeError):
+            return {}
+        except Exception as exc:                     # noqa: BLE001 -- Valkey away
+            if time.time() - self._last_err > 300:
+                self._last_err = time.time()
+                print("[boardjan] the watch document could not be read (%r)" % (exc,),
+                      flush=True)
             return {}
 
     def sample(self, now=None):

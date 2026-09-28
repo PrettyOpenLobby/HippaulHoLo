@@ -29,7 +29,7 @@ jan_testenv.setup()          # this tree's services + the OpenLobby core
 os.chdir(SERVICES)
 
 _TD = tempfile.mkdtemp()
-os.environ["POL_JAN_SEATS_FILE"] = os.path.join(_TD, "seats.json")
+os.environ["POL_JAN_SEATS_KEY"] = "jan:test:%s:seats" % os.path.basename(_TD)
 os.environ.setdefault("POL_DATA_DIR", _TD)
 
 import polpro                                                    # noqa: E402
