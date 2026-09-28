@@ -63,16 +63,17 @@ an existing /data") and before the title starts. From this directory:
 DC="docker compose --project-directory ../openlobby -f ../openlobby/docker-compose.yml -f docker-compose.yml"
 $DC run --rm --no-deps --entrypoint python jan janstore.py import event /data/resources/janevent.json
 $DC run --rm --no-deps --entrypoint python jan janstore.py import rank_snapshot /data/resources/jan-rank-snapshot.json
-$DC run --rm --no-deps -v crystalholo_jan-board-state:/state:ro --entrypoint python jan janstore.py import board_state /state
+$DC run --rm --no-deps -v openlobby_jan-board-state:/state:ro --entrypoint python jan janstore.py import board_state /state
 ```
 
-The last reads the board's old state volume (`crystalholo_jan-board-state`,
-from when this was a compose project of its own; `docker volume ls` shows the
-name) and matters only where the board posted to Discord; without it the
-board posts its messages afresh. Each command only reads its source, runs in
-one transaction, prints what it imported and each entry it could not map,
-and refuses a table that already holds rows unless given `--merge`, which
-adds only the keys the table lacks. `--dry-run` prints the same report and
+The last reads the board's old state volume (`openlobby_jan-board-state`:
+the board ran in the core's compose project, so the volume carries its
+name; `docker volume ls` shows the name on your host) and matters only
+where the board posted to Discord; without it the board posts its messages
+afresh. Each command only reads its source, runs in one transaction, prints
+what it imported and each entry it could not map, and refuses a table that
+already holds rows unless given `--merge`, which adds only the keys the
+table lacks. `--dry-run` prints the same report and
 writes nothing, and a second run changes nothing. A file that is not there
 has nothing to import: an install that never ran an event has no
 `janevent.json`.
