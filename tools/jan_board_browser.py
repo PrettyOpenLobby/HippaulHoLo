@@ -53,6 +53,7 @@ def main(argv=None):
                                     "table": 1}]}, fh)
     # a watchable live table, for the watching page (written as jangame does)
     os.environ["POL_DATA_DIR"] = tmp
+    os.environ["POL_JAN_WATCH_KEY"] = "jan:test:%s:tables-live" % os.path.basename(tmp)
     watch_id = str((2 << 16) | 1)
     p0 = [{"tile": "9m", "called": False, "riichi": False},
           {"tile": "1s", "called": False, "riichi": True},
@@ -88,11 +89,13 @@ def main(argv=None):
                       + sum(1 for m in s["melds"] if m["from"] >= 0 and m["called"])
                       for s in watch_state["seats"])
 
+    import janstore
+
     def write_watch_file():
-        with open(os.path.join(tmp, "jan-tables-live.json"), "w") as fh:
-            json.dump({"stamp": time.time(),
-                       "tables": {watch_id: {"watchable": True, "state": watch_state},
-                                  "999": {"watchable": False}}}, fh)
+        janstore.kv.set_json(janstore.watch_key(),
+                             {"stamp": time.time(),
+                              "tables": {watch_id: {"watchable": True, "state": watch_state},
+                                         "999": {"watchable": False}}})
 
     write_watch_file()
     import boardjan
@@ -352,8 +355,9 @@ def main(argv=None):
                                                   "yaku": [["riichi", 1], ["dora", 1]]}]}
         won["seats"][1]["score"] += 3900
         won["seats"][3]["score"] -= 3900
-        with open(os.path.join(tmp, "jan-tables-live.json"), "w") as fh:
-            json.dump({"stamp": time.time(), "tables": {watch_id: {"watchable": True, "state": won}}}, fh)
+        janstore.kv.set_json(janstore.watch_key(),
+                             {"stamp": time.time(),
+                              "tables": {watch_id: {"watchable": True, "state": won}}})
         b.pump(7.0)
         nows = b.js("[...document.querySelectorAll('#results .pl')].map(e => [e.querySelector('.n').textContent, e.querySelector('.now').textContent])")
         want = {s["name"]: "{:,}".format(s["score"]) for s in won["seats"]}

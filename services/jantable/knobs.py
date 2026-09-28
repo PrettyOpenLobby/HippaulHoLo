@@ -123,8 +123,14 @@ SWEEP_S = float(os.environ.get("POL_JAN_SWEEP_S", "1.0") or 1.0)
 #: only when something changed or WATCH_EVERY_S has passed (the board reads a
 #: stale stamp as "the server is gone"). `Manager.watchable(lobby key)` is
 #: janhourou's rule -- the creator's own GALLEY_LIMIT, no password; without a
-#: rule nothing is watchable. POL_JAN_WATCH_FILE=0 turns the file off.
-WATCH_FILE = os.environ.get("POL_JAN_WATCH_FILE", "jan-tables-live.json").strip()
+#: rule nothing is watchable. The document goes to Valkey under WATCH_FILE,
+#: which despite its name is now a key (POL_JAN_WATCH_KEY, default
+#: jan:tables-live; it was the file <POL_DATA_DIR>/jan-tables-live.json), and
+#: POL_JAN_WATCH_KEY=0 turns it off.
+WATCH_FILE = os.environ.get("POL_JAN_WATCH_KEY", "jan:tables-live").strip()
+#: the key outlives its last write by this long; the board calls a document
+#: older than its own WATCH_STALE_S (120 s) gone anyway
+WATCH_TTL_S = 300
 WATCH_EVERY_S = 5.0
 #: how long a FINISHED game's last frame stays in the file (the table itself
 #: is forgotten at once): long enough for the board's 1 s sampler to see WHY

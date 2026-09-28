@@ -38,10 +38,12 @@ WHAT THE CLIENT TOLD US (all read from the jan-c-full decompile, not guessed):
 WHERE THE STATE LIVES: the same split as tmroom.py, in miniature. Reservations
 arrive on the AUTH band (`authsess` container); `b/g/PTL` is served on the
 lobby band (`login` container). The writer keeps memory and publishes a JSON
-file under POL_DATA_DIR; readers re-read it when its mtime moves. `_adopt`
-seeds memory from the file before the first write so a container restart does
-not wipe live reservations (tmroom learned that one the hard way -- see its
-`_adopt` banner).
+document to Valkey under `jan:seats` (janstore.Snapshot; it was the file
+`<POL_DATA_DIR>/jan-seats.json`); readers re-read it when its generation
+moves. `_adopt` seeds memory from the published document before the first
+write so a container restart does not wipe live reservations (tmroom learned
+that one the hard way -- see its `_adopt` banner). It is live state: losing
+Valkey loses who is seated, and nothing else.
 
 EXPIRY: a PS2 client that crashes or is powered off sends nothing more, so a
 seat left alone would wedge its table for ever. Every Jan line on the auth band
@@ -53,7 +55,7 @@ container needs no write access to enforce it.
 
     POL_JAN_SEATS=0           kill switch: reserve/cancel fall back to the old
                               constant-result behaviour, nothing is stored
-    POL_JAN_SEATS_FILE        default $POL_DATA_DIR/jan-seats.json
+    POL_JAN_SEATS_KEY         default jan:seats (the Valkey key)
     POL_JAN_SEAT_TTL_S        default 1800; 0 = never expire
     POL_JAN_INPLAY_TTL_S      default 600; 0 = never expire
     POL_JAN_SEAT_WARN_S       default 120: MjNOTICETIMEUPWARNING goes out this
@@ -81,6 +83,8 @@ import json
 import os
 import threading
 import time
+
+import janstore
 
 CAPACITY = 4
 
@@ -119,11 +123,10 @@ _MEMBERS = {}           # member (str) -> {"face": int, "voice": int, ...}
 _MASTER_CHANGES = []    # [(table id, new master member)] since the last take
 _OWNER = [False]
 _ADOPTED = [False]
-_CACHE = {"mtime": -1.0, "data": {}}
 _LAST_PUBLISH = [0.0]
-
-_FILE_DEFAULT = os.path.join(os.environ.get("POL_DATA_DIR", "/data"),
-                             "jan-seats.json")
+#: the published document (see the module banner); its key follows
+#: POL_JAN_SEATS_KEY at every read and write, so a test can point it elsewhere
+_SHARED = janstore.Snapshot(janstore.seats_key())
 
 # --- THE DELTA STREAM (2026-09-03) ------------------------------------------
 #
@@ -477,7 +480,8 @@ def enabled():
 
 
 def _path():
-    return os.environ.get("POL_JAN_SEATS_FILE", _FILE_DEFAULT)
+    """The live key the seats are published under."""
+    return janstore.seats_key()
 
 
 def _seat_ttl():
@@ -493,23 +497,15 @@ def _inplay_ttl():
 
 
 def _read_file():
-    try:
-        mtime = os.stat(_path()).st_mtime
-    except OSError:
-        return {}
-    if mtime != _CACHE["mtime"]:
-        try:
-            with open(_path(), "r", encoding="utf-8") as f:
-                _CACHE["data"] = json.load(f) or {}
-            _CACHE["mtime"] = mtime
-        except (OSError, ValueError):
-            return _CACHE["data"]           # torn write: last good view stands
-    return _CACHE["data"]
+    """The published seats document ({} when there is none)."""
+    _SHARED.key = _path()
+    return _SHARED.read()
 
 
 def _adopt():
-    """Seed memory from the file BEFORE this process writes it -- setdefault,
-    never overwrite, so a restart cannot publish emptiness over live seats."""
+    """Seed memory from the published document BEFORE this process writes it
+    -- setdefault, never overwrite, so a restart cannot publish emptiness over
+    live seats."""
     if _ADOPTED[0]:
         return
     _ADOPTED[0] = True
@@ -584,24 +580,19 @@ def _publish(force=True):
         return                              # a pure touch can wait a beat
     _LAST_PUBLISH[0] = now
     try:
-        p = _path()
-        d = os.path.dirname(p)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        tmp = p + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"v": 2, "tables": _TABLES, "seq": _SEQ,
-                       "deltas": _DELTAS, "rows": _ROWS,
-                       "members": _MEMBERS}, f)
-        os.replace(tmp, p)                  # atomic
-        _CACHE["mtime"] = -1.0
-    except OSError:
-        pass                                # memory still serves this process
+        with _LOCK:
+            doc = json.loads(json.dumps({"v": 2, "tables": _TABLES, "seq": _SEQ,
+                                         "deltas": _DELTAS, "rows": _ROWS,
+                                         "members": _MEMBERS}))
+        _SHARED.key = _path()
+        _SHARED.write(doc)                  # one SET: readers see all or nothing
+    except Exception as exc:                # noqa: BLE001 -- Valkey away
+        janstore._whine("publishing the seats", exc)   # memory still serves us
 
 
 def _live_tables():
     """The table map, from wherever it is actually known (tmroom's rule: the
-    owner answers from memory, everyone else from the file)."""
+    owner answers from memory, everyone else from the published document)."""
     if _OWNER[0]:
         return _TABLES
     return (_read_file() or {}).get("tables", {})
@@ -1344,11 +1335,11 @@ def selftest():
         ok = ok and bool(cond)
 
     with tempfile.TemporaryDirectory() as td:
-        os.environ["POL_JAN_SEATS_FILE"] = os.path.join(td, "jan-seats.json")
+        os.environ["POL_JAN_SEATS_KEY"] = "jan:test:%s:jan-seats" % os.path.basename(td)
         _TABLES.clear()
         _ADOPTED[0] = False
         _OWNER[0] = False
-        _CACHE["mtime"] = -1.0
+        _SHARED.forget()
 
         r, seat, ms = reserve(1, 8, "PS2Tester")
         check("first reserver is the master (result 2, seat 0)",
@@ -1490,7 +1481,7 @@ def selftest():
         saved = dict(_TABLES)
         _TABLES.clear()
         _OWNER[0] = False
-        _CACHE["mtime"] = -1.0
+        _SHARED.forget()
         check("a reader process sees the published seats", seat_count(1) >= 1)
         # ...and a restarted WRITER adopts instead of wiping
         _ADOPTED[0] = False
@@ -1676,10 +1667,10 @@ def selftest():
                                                 "at": time.time()}}}},
               "seq": 7, "deltas": [[7, 2]], "rows": {"2": [1, False]},
               "members": {}}
-        with open(os.environ["POL_JAN_SEATS_FILE"], "w", encoding="utf-8") as f:
-            json.dump(v1, f)
+        _SHARED.key = _path()
+        _SHARED.write(v1)                   # what a v1 writer published
         _TABLES.clear(); _DELTAS.clear(); _ROWS.clear(); _SEQ.clear()
-        _ADOPTED[0] = False; _OWNER[0] = False; _CACHE["mtime"] = -1.0
+        _ADOPTED[0] = False; _OWNER[0] = False; _SHARED.forget()
         check("a READER of a v1 file sees its seq as room 0's",
               sequence(0) == 7 and sequence(101) == 0 and seat_count(2) == 1)
         _adopt()
@@ -1693,7 +1684,7 @@ def selftest():
               sequence(101) == 1 and sequence(0) == 7)
         _publish()
         _TABLES.clear(); _DELTAS.clear(); _ROWS.clear(); _SEQ.clear()
-        _OWNER[0] = False; _CACHE["mtime"] = -1.0
+        _OWNER[0] = False; _SHARED.forget()
         check("a reader of the v2 file sees both rooms",
               sequence(0) == 7 and sequence(101) == 1 and seat_count(t101) == 1)
         _ADOPTED[0] = False
@@ -1748,7 +1739,7 @@ def selftest():
               gallery_of(77) == t101)
         _publish()
         _TABLES.clear(); _DELTAS.clear(); _ROWS.clear(); _SEQ.clear()
-        _OWNER[0] = False; _CACHE["mtime"] = -1.0
+        _OWNER[0] = False; _SHARED.forget()
         check("the gallery crosses the container split (file v2)",
               gallery_of(77) == t101)
         _ADOPTED[0] = False
@@ -1781,7 +1772,7 @@ def selftest():
               "overruns", len(table_channel(room_table_id(4095, 4))) <= TABLE_CHAN_MAX
               and table_channel(room_table_id(4095, 4)) == "#MJS0TFFF004")
 
-        os.environ.pop("POL_JAN_SEATS_FILE", None)
+        os.environ.pop("POL_JAN_SEATS_KEY", None)
 
     print("\n%s" % ("ALL OK" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

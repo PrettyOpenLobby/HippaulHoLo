@@ -176,13 +176,14 @@ def live_feed_checks(tmp, boardjan, polboards):
 
 def watch_checks(tmp, boardjan):
     print("watching -- only allowed tables, only 30 s late")
-    path = os.path.join(tmp, "jan-tables-live.json")
+    import janstore
+    key = "jan:test:%s:tables-live" % os.path.basename(tmp)
     clock = {"t": 1000.0}
-    w = boardjan.Watch(path=path, delay=30, clock=lambda: clock["t"])
+    w = boardjan.Watch(key=key, delay=30, clock=lambda: clock["t"])
 
     def write(tables, stamp=None):
-        with open(path, "w") as fh:
-            json.dump({"stamp": clock["t"] if stamp is None else stamp, "tables": tables}, fh)
+        janstore.kv.set_json(key, {"stamp": clock["t"] if stamp is None else stamp,
+                                   "tables": tables})
 
     def step(t):
         clock["t"] = t

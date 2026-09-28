@@ -21,9 +21,9 @@ os.environ["POL_LOG_DIR"] = os.path.join(tmp, "logs")
 for d in ("data", "res", "logs"):
     os.makedirs(os.path.join(tmp, d), exist_ok=True)
 os.environ["POL_JAN_SEATS"] = "1"
-os.environ["POL_JAN_SEATS_FILE"] = os.path.join(tmp, "seats.json")
+os.environ["POL_JAN_SEATS_KEY"] = "jan:test:%s:seats" % os.path.basename(tmp)
 os.environ["POL_JAN_RULES"] = "1"
-os.environ["POL_JAN_RULES_FILE"] = os.path.join(tmp, "rules.json")
+os.environ["POL_JAN_RULES_KEY"] = "jan:test:%s:rules" % os.path.basename(tmp)
 for k in ("POL_JAN_RESERVE_LIMITS", "POL_JAN_LIMIT_MONEY_MIN",
           "POL_JAN_LIMIT_LEVEL_MIN"):
     os.environ.pop(k, None)
