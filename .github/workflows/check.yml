@@ -5,6 +5,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -19,6 +21,7 @@ jobs:
       # core checked out beside it (tools/jan_testenv.py finds ../openlobby)
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           path: crystalholo
       - uses: actions/checkout@v4
         with:
