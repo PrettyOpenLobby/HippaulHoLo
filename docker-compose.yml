@@ -88,8 +88,8 @@ services:
     entrypoint: ["python", "polboards.py", "--bind", "0.0.0.0",
                  "--jan-port", "8791"]
     environment:
-      POL_ACCOUNTS_DB: /data/accounts.db
       POL_DATA_DIR: /data
+      # the players' names and portraits come from the account tables, and
       # the Discord bookkeeping goes to the jan_board_state table
       POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
       POL_VALKEY_URL: "valkey://valkey:6379/0"
