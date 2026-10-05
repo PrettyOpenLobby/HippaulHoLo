@@ -685,6 +685,9 @@ def _jan_face_ok(idx):
 #: the title, so the game band can answer for a proxied connection.
 _JAN_BUILD_BY_MEMBER = {}
 
+#: First W2U-0003 version (yyyymmdd) that ships the 2004 module to PC.
+JAN_PC_2004_FROM = "20261005"
+
 
 def _jan_peer_is_2004():
     """True when the client on THIS thread runs Janhourou 20040727_2.
@@ -736,7 +739,13 @@ def _jan_peer_is_2004():
     # A US Viewer (region P2U) can only ever install the 2004 build, and once
     # it has taken an overlay from the P2U-0003 channel it claims THAT
     # version, which the version test alone would read as the 2002 tree.
-    got = True if key.startswith("P2U/") else jansave.is_2004_version(version)
+    # The PC Viewer (W2U) runs JongHoLow as a static recomp, shipped on the
+    # W2U-0003 channel: up to 20260930_0 it was the 2002 module, from
+    # JAN_PC_2004_FROM on it is the 2004 one.
+    if key.startswith("W2U/"):
+        got = (version or "")[:8] >= JAN_PC_2004_FROM
+    else:
+        got = True if key.startswith("P2U/") else jansave.is_2004_version(version)
     if _member:
         _JAN_BUILD_BY_MEMBER[_member] = got
     return got
