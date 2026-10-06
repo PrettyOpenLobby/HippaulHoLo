@@ -67,7 +67,7 @@ if False:                                             # pragma: no cover
 #: separate webhook (Tetra Master was given one channel for the
 #: rankings and one for the auction, 2026-09-12), a separate message edited in
 #: place, and a separate message-id file.
-FEEDS = {"tm": ("auction", "live"), "jan": ("live",), "ffxi": ("conquest", "auction")}
+FEEDS = {"tm": ("auction", "live"), "jan": ("live",), "fmo": ("arenas",), "ffxi": ("conquest", "auction")}
 #: feeds that post into their board's own channel when they have no webhook of
 #: their own: the Jan "live" feed (a post per watchable table, 2026-09-13)
 #: belongs next to the Jan board.
