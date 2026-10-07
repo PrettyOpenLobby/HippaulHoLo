@@ -521,36 +521,41 @@ def _handle_line(line, peer="-", member_id=0):
                                         seat=social._master_seat_of(_lobby) if _members else 0,
                                         flags=(1, 1, 1, 1),
                                         tail=seating._member_names(seats, table))
-            start = janmsgs.notice_gamestart(1)
             # WARNING: AND THE ONE THAT ACTUALLY STARTS IT. Measured 2026-08-17 after a
             # live client accepted the pair above and then waited for ever:
             # TableSelectMain returns 1 (= enter the game) on DAT_004460f2, which
-            # is set by notice bit 0x20 = MjNOTICEGAMESETUP (20). The flag
-            # MjNOTICEGAMESTART (18) sets, DAT_004460f0, is written and NEVER
-            # READ anywhere in the module -- so 18 alone is inert. 18 is kept
-            # because SE presumably sends both and it costs nothing.
+            # is set by notice bit 0x20 = MjNOTICEGAMESETUP (20).
+            #
+            # MjNOTICEGAMESTART (18) is NOT sent. In the 2002 build its flag
+            # (DAT_004460f0) is never read, but the 2004 build's lobby notice
+            # printer (0x003a80a0) answers bit 8 with two lines: "the table you
+            # reserved has started its game" and then "Unfortunately, the
+            # reservation was cancelled" (0x004b0390, 0x004b03d0). Its flag
+            # DAT_004c42b0 is never read either, so the only thing 18 did for a
+            # 2004 player was tell them their table was cancelled as they sat
+            # down at it. SE presumably sent 18 to reservers who were NOT
+            # pulled into the game.
             setup = janmsgs.notice_gamesetup(2)
             wirelog.log("%s   -> %s  [driving the table out of state 0x1f]  %s"
                 % (peer, wirelog.describe(notice), notices._seat_summary(seats, table)))
-            wirelog.log("%s   -> %s  [inert: its flag is never read]" % (peer, wirelog.describe(start)))
             wirelog.log("%s   -> %s  [THE TRIGGER: bit 0x20 -> DAT_004460f2 -> "
                 "TableSelectMain returns 1]" % (peer, wirelog.describe(setup)))
             # The 2004 build reads four seat names out of the setup notice
             # (janmsgs2004). The copies queued for the other seats below stay
             # in 2002 shape and are converted per recipient as they drain.
             out += [janwire.encode(_r) for _r in
-                    builds.to_peer_build([notice, start, setup],
+                    builds.to_peer_build([notice, setup],
                                   member_id=member_id, peer=peer)]
-            # EVERY OTHER SEATED HUMAN NEEDS THIS EXACT TRIO, or their client
+            # EVERY OTHER SEATED HUMAN NEEDS THIS EXACT PAIR, or their client
             # sits in the lobby watching a table it is seated at go "in play"
             # without it -- which is what was seen live as "being kicked".
             # They ride out on that member's next line (~2 s).
             for _m, _st, _nm, _pid in _members:
                 if _m == member_id:
                     continue
-                for _r in (notice, start, setup):
+                for _r in (notice, setup):
                     table.queue_for(_st, _r)
-                wirelog.log("%s      queued the game-start trio for member %s at seat "
+                wirelog.log("%s      queued the game-start pair for member %s at seat "
                     "%d" % (peer, _m, _st))
         return out
 
