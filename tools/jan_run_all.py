@@ -58,6 +58,8 @@ SUITES = [
     ("janseats",      [PY, "janseats.py", "--selftest"],       SERVICES, False),
     ("janstats",      [PY, "janstats.py", "--selftest"],       SERVICES, False),
     ("janevent",      [PY, "janevent.py", "--selftest"],       SERVICES, False),
+    # JongHoLow's tools for the admin panel (janadmin.py), over HTTP.
+    ("janadmin",      [PY, "janadmin_test.py"],                HERE, True),
     ("jansave",       [PY, "jansave.py", "--selftest"],        SERVICES, False),
     # the lobby lists (parlour list, room list, PTL, the table record)
     ("janlobby",      [PY, "janlobby.py", "--selftest"],       SERVICES, False),
@@ -97,7 +99,7 @@ SUITES = [
 #: the ones that keep Janhourou's durable state (the player records, the event
 #: record, the rank snapshot, the board's bookkeeping), and the core's suites
 #: whose accounts and resources live in PostgreSQL too
-NEEDS_DB = {"jangame", "janevent", "janstats", "jansave", "jan_board", "jan_gaps",
+NEEDS_DB = {"jangame", "janevent", "janadmin", "janstats", "jansave", "jan_board", "jan_gaps",
             "jan_reserve_limits", "jan_store", "jan_import", "core_resource",
             "core_content_profile"}
 

@@ -336,8 +336,17 @@ WATCH = Watch()
 
 def start(args=None):
     """polboards' start hook: sample the tables from startup, so the delayed
-    view has its 30 s of history before anyone opens the page."""
+    view has its 30 s of history before anyone opens the page. Then
+    JongHoLow's tools for an OpenLobby admin panel (janadmin.py), when
+    POL_JAN_ADMIN_PORT is set: here, not in the game server, so restarting
+    them never touches a table."""
     WATCH.start()
+    try:
+        import janadmin
+    except ImportError as e:                       # a core without olport: the board runs on
+        print("[boardjan] admin tools not started (%s)" % e, flush=True)
+        return
+    janadmin.start()
 
 
 #: the bot's status. Jan counts the PEOPLE SEATED at live tables rather than a
