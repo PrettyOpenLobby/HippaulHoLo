@@ -11,7 +11,7 @@ on the wire and the body layout of every message in the play sequence:
     MjALLDATA 0x2e/ACK is the resync; MjGAMERESULTHALF1/2 0x38/0x3a end a hanchan.
 
 PROVENANCE. Every offset here was read out of the client's own receive handlers
-in `work/ps2/out/jan-c-full/console.c` (and `mahdisp.c` for the two reply
+in a decompile of the client (`console.c`, and `mahdisp.c` for the two reply
 encoders) -- SQUARE shipped JanHouRou.pex with its debug logging intact, so each
 handler destructures its message field by field and IS the layout spec. Where a
 field's MEANING is not established the builder takes it as a named argument and
@@ -1365,12 +1365,25 @@ MELD_TYPE_CHI = 1               # run, only the 0x40-marked tile rotated
 MELD_TYPE_PON = 4               # pon / minkan / kakan, same draw branch as chi
 
 
-def meld_block(melds):
+#: Where the sideways tile of an open pon/kan sits, by who it came from
+#: ((from_seat - owner) % 4): the player on the left -> leftmost, across ->
+#: second, the right -> rightmost. -1 = the last tile, whatever the length.
+_SIDEWAYS_AT = {3: 0, 2: 1, 1: -1}
+
+
+def meld_block(melds, seat=None):
     """A seat's melds as the 16 bytes MjALLDATA's +0xe6 block wants.
 
     Four melds of four tiles (meld unpack: 7-bit id, so bit 6 is part of the
     id). Tiles go in RANK order, and the CALLED tile carries bit 6 (POND_FLAG)
     so the client draws it rotated at its rank position -- see the banner above.
+
+    WARNING: A PON'S TILES ARE ALL ONE RANK, so "its rank position" is always
+    slot 0, which the client draws leftmost: every pon read as claimed from
+    the player on the left (live report 2026-10-13). With `seat` (the meld
+    owner) an open pon/kan puts the called tile where the table convention
+    says it came from (`_SIDEWAYS_AT`). A chi only ever comes from the left
+    and keeps the rank-order draw measured live 09-03.
     """
     out = bytearray(16)
     for i, m in enumerate(melds[:4]):
@@ -1379,13 +1392,26 @@ def meld_block(melds):
         # None can appear in a malformed/padded meld -- sort it last and never
         # mark it (the old encoder tolerated it as tile_byte(None) == 0).
         tiles = sorted(tiles, key=lambda t: mj.kind(t) if t is not None else 0x7F)
-        marked = False
+        # Which slot carries the flag: by default the first of the called
+        # tile's rank (right for a chi, slot 0 for a pon).
+        flag_at = next((j for j, t in enumerate(tiles[:4]) if t is not None
+                        and called is not None
+                        and mj.kind(t) == mj.kind(called)), None)
+        src = getattr(m, "from_seat", -1)
+        if (flag_at is not None and seat is not None and src is not None
+                and src >= 0 and getattr(m, "kind", None) not in (mj.CHI, mj.ANKAN)
+                and (src - seat) % 4 in _SIDEWAYS_AT):
+            # Move the claimed tile itself (a red five keeps its own sheet)
+            # to its side and flag that slot.
+            j = next((j for j, t in enumerate(tiles) if t == called), flag_at)
+            t = tiles.pop(j)
+            at = _SIDEWAYS_AT[(src - seat) % 4]
+            tiles.insert(len(tiles) if at < 0 else at, t)
+            flag_at = min(len(tiles), 4) - 1 if at < 0 else at
         for j, t in enumerate(tiles[:4]):
             b = tile_byte(t)
-            if (not marked and t is not None and called is not None
-                    and mj.kind(t) == mj.kind(called)):
+            if j == flag_at:
                 b |= POND_FLAG
-                marked = True
             out[i * 4 + j] = b
     return bytes(out)
 
@@ -2324,6 +2350,25 @@ def selftest():
                 % called_marks)
     ok &= check(sum(bool(b & POND_FLAG) for b in blk2[:3]) == 1,
                 "a pon flags exactly one tile (the claimed one)")
+    # WHO IT CAME FROM (live 2026-10-13: every pon read "from the left"). The
+    # client's own pon motion (yamaguchi__002e7e70) seats the claimed tile at
+    # index 2 / 1 / 0 for a discarder 1 / 2 / 3 seats round from the caller.
+    for _src, _want in ((1, 2), (2, 1), (3, 0)):
+        _p = mj.Meld(mj.PON, [mj.MAN + 2] * 3, from_seat=(0 + _src) % 4,
+                     called=mj.MAN + 2)
+        _b = meld_block([_p], seat=0)
+        ok &= check([bool(x & POND_FLAG) for x in _b[:3]]
+                    == [i == _want for i in range(3)],
+                    "a pon from %d seat(s) round lies sideways at slot %d"
+                    % (_src, _want))
+    _k = mj.Meld(mj.MINKAN, [mj.PIN + 4] * 4, from_seat=0, called=mj.PIN + 4)
+    ok &= check([bool(x & POND_FLAG) for x in meld_block([_k], seat=3)[:4]]
+                == [False, False, False, True],
+                "a minkan from the right lies sideways at its LAST slot")
+    _c = mj.Meld(mj.CHI, [mj.SOU + 6, mj.SOU + 7, mj.SOU + 8], from_seat=3,
+                 called=mj.SOU + 7)
+    ok &= check(meld_block([_c], seat=0) == meld_block([_c]),
+                "a chi is unchanged by the owner seat (rank-order draw)")
     rec = alldata(0x17, hands, [[]] * 4, melds=[b"", blk1, blk2, b""],
                   meld_types={1: typ1, 2: typ2})
     ok &= check(rec[0x126 + 1 * 4] == MELD_TYPE_CHI,

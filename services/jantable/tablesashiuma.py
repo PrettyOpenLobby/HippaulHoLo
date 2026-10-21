@@ -12,13 +12,15 @@ import janmsgs as M                                                 # noqa: E402
 #: on the table and computes NO money: at the end the pair's worse-placed seat
 #: pays the better-placed one the stake, in result points (thousands), applied
 #: to the MjGAMERESULT rows. `POL_JAN_SASHIUMA=1` turns the handshake ON.
-#: WARNING: OFF BY DEFAULT UNTIL CONFIRMED LIVE (2026-09-04 audit): the first cut
-#: defaulted ON with the knob unset, was pushed at 23:31Z, and pol-git-sync
-#: deployed a never-exercised five-message handshake that holds EVERY deal
-#: on prod. A feature with zero live instances does not get to sit in front
-#: of the deal by default -- nothing counts as fixed without live proof.
+#: WARNING: this was OFF BY DEFAULT UNTIL CONFIRMED LIVE: the first cut
+#: defaulted ON with the knob unset, which put a never-exercised five-message
+#: handshake in front of EVERY deal. A feature with zero live instances does
+#: not get to sit in front of the deal by default.
+#: DEFAULT ON now (retail had it: the client carries the whole
+#: handshake and the results stage). POL_JAN_SASHIUMA=0 withdraws it with no
+#: deploy -- the deal then follows READY at once, as before.
 _sv = os.environ.get("POL_JAN_SASHIUMA", "").strip().lower()
-SASHIUMA = _sv in ("1", "on", "yes", "true")
+SASHIUMA = _sv not in ("0", "off", "no", "false")
 #: The stake per bet in result points; 0 = the table uma's top value (20).
 SASHIUMA_UMA = float(os.environ.get("POL_JAN_SASHIUMA_UMA", "").strip() or 0)
 #: A bot: "accept" = agree to any bet proposed to it, propose none (default);
@@ -67,10 +69,22 @@ class TableSashiuma:
         self.sashiuma = {"phase": "request", "block": bytearray(M.SASHIUMA_BLOCK),
                          "answered": set(), "started": set()}
         self._sashiuma_bots_propose()
-        self.trace("SASHIUMA offer -> %s  [stake %g]"
-                   % (", ".join(self._seatname(s) for s in sorted(self.live)),
-                      self._sashiuma_stake()))
-        return [self.msg_sashiuma_start(s) for s in sorted(self.live)]
+        # WARNING: ONLY SEATS WHOSE CLIENT SAID MjREADY. A client still entering
+        # the table drops whatever reaches it first (seen live: the
+        # offer was pushed to a player 2.6 s before their READY, was lost, and the
+        # table waited on an answer that could never come). The others get
+        # theirs in reply to their own READY (the MjREADY arm's late-offer
+        # branch). No READY on record at all (a selftest driving start_game
+        # directly) = everyone, as before.
+        ready = getattr(self, "readied", None) or set()
+        now = sorted(s for s in self.live if s in ready) or sorted(self.live)
+        later = sorted(s for s in self.live if s not in now)
+        self.trace("SASHIUMA offer -> %s  [stake %g]%s"
+                   % (", ".join(self._seatname(s) for s in now),
+                      self._sashiuma_stake(),
+                      ("  [on their READY: %s]"
+                       % ", ".join(self._seatname(s) for s in later)) if later else ""))
+        return [self.msg_sashiuma_start(s) for s in now]
 
     def _sashiuma_bots_propose(self):
         """Policy "propose": each bot proposes one bet to a random other seat."""

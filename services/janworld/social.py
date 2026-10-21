@@ -55,10 +55,52 @@ def notify_master_changes(peer="-"):
     return changes
 
 
+def notice_call_on():
+    """POL_JAN_NOTICECALL=0 withholds MjNOTICECALL (default on)."""
+    import os
+    return os.environ.get("POL_JAN_NOTICECALL", "1") == "1"
+
+
+def notify_table_call(tid, joiner, peer="-"):
+    """MjNOTICECALL when a GUEST takes a seat at a table that has a master.
+
+    The client prints these two lines and nothing else (notices.call_notice),
+    and its room row has a state for each: 3 "メンバー集合待機中" (waiting
+    for the members to gather) and 4 "すぐゲームできます" (ready to play). Our
+    rows go straight to 4 the moment anyone sits, because Start Game is gated
+    on exactly that, so the one moment the table really changes for the
+    people at it is a guest arriving:
+
+      * the guest: "the table you reserved is waiting for the game to start"
+        (+0x20 = 1) -- it is waiting on the master's Start Game;
+      * the master: "the game can be started" (+0x20 = 0) -- somebody joined.
+
+    OURS: when SE sent them is not measured (their client only shows that it
+    drew them). The master's copy rides the push queue, which a client in the
+    room drains on its `<DR>` poll; the guest's is RETURNED, for the caller to
+    send right after the guest's own MjRESERVEACK. [] when nothing is due."""
+    if (janseats is None or not janseats.enabled() or not tid or not joiner
+            or not notice_call_on()):
+        return []
+    try:
+        master = janseats.master_of(tid)
+    except Exception:
+        master = 0
+    if not master or int(master) == int(joiner):
+        return []
+    pushed = pushqueue.push_record(int(master), notices.call_notice(False, ref=tid))
+    wirelog.log("%s      MjNOTICECALL: member %s joined %s -- 'waiting for the game to "
+        "start' to them, 'the game can be started' to master %s%s"
+        % (peer, joiner, seating._tl(tid), master, "" if pushed else " (not queued)"))
+    return [notices.call_notice(True, ref=tid)]
+
+
 def warn_expiring_seats(peer="-"):
     """MjNOTICETIMEUPWARNING for seats about to age out (called from the
-    `<DR>` path, the lobby's only regular tick). Inert on the client beyond a
-    debug line; the seat store is the thing that actually expires them."""
+    `<DR>` path, the lobby's only regular tick). The 2004 lobby prints it as
+    "your reserved table will be cancelled in %d minutes" (the notice carries
+    whole minutes, see `notices.timeup_notice`); the 2002 build only logs it.
+    The seat store is the thing that actually expires them."""
     if janseats is None or not janseats.enabled():
         return 0
     n = 0
@@ -67,7 +109,8 @@ def warn_expiring_seats(peer="-"):
             if pushqueue.push_record(member, notices.timeup_notice(left)):
                 n += 1
                 wirelog.log("%s   table %s: member %s's seat expires in %ds -- "
-                    "MjNOTICETIMEUPWARNING queued" % (peer, tid, member, left))
+                    "MjNOTICETIMEUPWARNING queued (+0x20 = %d min)"
+                    % (peer, tid, member, left, notices.timeup_minutes(left)))
     except Exception as e:
         wirelog.log("%s   seat-expiry warning raised: %s" % (peer, e))
     return n

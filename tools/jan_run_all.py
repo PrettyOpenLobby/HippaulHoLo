@@ -66,6 +66,8 @@ SUITES = [
     # jangame.py / janhourou.py are facades over the jantable / janworld
     # packages: every name the tree rebinds through them must reach its owner
     ("facade_rebind", [PY, "facade_rebind_check.py"],          HERE,     False),
+    # the gap audit's fixes and the two-human paths, end to end
+    ("jan_gaps",      [PY, "jan_gaps_test.py"],                HERE,     False),
     # the opt-in switches (tests/): entry limits need only this tree; the
     # channel ids need the core's mgkey
     ("jan_reserve_limits", [PY, os.path.join(TESTS, "test_jan_reserve_limits.py")],
@@ -95,7 +97,7 @@ SUITES = [
 #: the ones that keep Janhourou's durable state (the player records, the event
 #: record, the rank snapshot, the board's bookkeeping), and the core's suites
 #: whose accounts and resources live in PostgreSQL too
-NEEDS_DB = {"jangame", "janevent", "janstats", "jansave", "jan_board",
+NEEDS_DB = {"jangame", "janevent", "janstats", "jansave", "jan_board", "jan_gaps",
             "jan_reserve_limits", "jan_store", "jan_import", "core_resource",
             "core_content_profile"}
 

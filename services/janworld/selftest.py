@@ -12,6 +12,13 @@ from . import dispatch, galley, notices, opcodes, opener, pushqueue, seating, se
 def selftest():
     """Stand the server up on a loopback port and complete a ping exchange."""
     ok = True
+    # READY must deal in these rigs: the side-bet handshake (on by default)
+    # would answer it with MjSASHIUMASTART. jantable's selftest covers it.
+    try:
+        from jantable import tablesashiuma as _tsu
+        _tsu.SASHIUMA = False
+    except ImportError:                                         # pragma: no cover
+        pass
     srv = server.Server(("127.0.0.1", 0), server.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     host, port = srv.server_address
@@ -127,11 +134,19 @@ def selftest():
         print("FAIL: banish names not at +0x28 (by) / +0x38 (kicked)"); ok = False
     if len(bn[0x28:0x38]) != notices.NAME_LEN:
         print("FAIL: name field is not 16 bytes"); ok = False
+    # The 2004 client prints +0x20 as "cancelled in %d MINUTES" (0x004b0440),
+    # so 90 seconds left reads 2 (rounded up), 120 reads 2, 0 is the
+    # "time ran out" line.
     tn = notices.timeup_notice(90)
     if (janwire.unpack(tn)["opcode"] != opcodes.MjNOTICETIMEUPWARNING
-            or struct.unpack_from("<I", tn, 0x20)[0] != 90 or tn[0x18] != 0):
+            or struct.unpack_from("<I", tn, 0x20)[0] != 2 or tn[0x18] != 0):
         print("FAIL: MjNOTICETIMEUPWARNING's rest time is +0x20 (malloc.c:1357), "
-              "not +0x18"); ok = False
+              "not +0x18, in MINUTES rounded up"); ok = False
+    _mins = [notices.timeup_minutes(x)
+             for x in (0, -5, 1, 60, 61, 120, 1800, 10 ** 6)]
+    if _mins != [0, 0, 1, 1, 2, 2, 30, 255]:
+        print("FAIL: timeup_minutes rounds seconds up to minutes, 0 stays 0, "
+              "capped at a byte"); ok = False
     sq = notices.serverquit_notice()
     if janwire.unpack(sq)["opcode"] != opcodes.MjNOTICESERVERQUIT or len(sq) != 0x20:
         print("FAIL: MjNOTICESERVERQUIT is a bare 0x20 notice"); ok = False
@@ -296,9 +311,12 @@ def selftest():
                                    payload=(0x5B01E2BB73B3B60B + member
                                             if polid is None else polid))
                 out = dispatch.handle_line(janwire.encode(req), member_id=member)
-                if isinstance(out, (list, tuple)):
-                    out = out[0] if out else None
-                return janwire.decode(out) if isinstance(out, bytes) else None
+                # the ACK, not a lobby notice queued for this member ahead of it
+                recs = [janwire.decode(o) for o in
+                        (out if isinstance(out, (list, tuple)) else [out])
+                        if isinstance(o, bytes)]
+                return next((r for r in recs
+                             if r[0x12] == opcodes.MjRESERVEACK), None)
 
             a = _ask(opcodes.MjPLAYREQ, 1, 8)
             if a is None or a[0x18] != 2 or a[0x19] != 0:
@@ -392,6 +410,23 @@ def selftest():
                               "seat 0 at +0x54, got %r"
                               % (_rp2 and _rp2[0x54])); ok = False
 
+                    # A member at NO table gets an EMPTY list and no table is
+                    # minted (2026-10-09: it used to be "me + three COMs, all
+                    # Ready", and a hidden Table per ask).
+                    _n_tables = len(dispatch.GAMES.tables)
+                    _rp3 = dispatch.handle_line(janwire.encode(_req), member_id=77)
+                    if isinstance(_rp3, (list, tuple)):
+                        _rp3 = _rp3[-1] if _rp3 else None
+                    _rp3 = janwire.decode(_rp3) if isinstance(_rp3, bytes) else None
+                    _ids3 = ([struct.unpack_from("<Q", _rp3, 0x30 + 8 * i)[0]
+                              for i in range(4)] if _rp3 is not None else None)
+                    if _ids3 != [0, 0, 0, 0]:
+                        print("FAIL: an unseated member's list must be empty, "
+                              "got %r" % (_ids3,)); ok = False
+                    if len(dispatch.GAMES.tables) != _n_tables:
+                        print("FAIL: asking for the member list minted a table")
+                        ok = False
+
             # without a member id the old constant behaviour must be untouched
             e = _ask(opcodes.MjPLAYCANCEL, 1, 0)
             if e is None or e[0x18] != opcodes.RESERVE_RESULT:
@@ -455,7 +490,10 @@ def selftest():
             # closes; a LEAVEREQ from a member in no gallery: 6 (the other code
             # the leave wait accepts -- it MUST get one of 5/6, mahdisp.c:1116).
             # The grant path is exercised further down, on a running table.
+            _gal_was = galley.GALLERY_ENABLE
+            galley.GALLERY_ENABLE = False       # the rollback lever, explicitly
             g = _ask(opcodes.MjGALLEYREQ, 1, 44, f13=0x03)
+            galley.GALLERY_ENABLE = _gal_was
             if g is None or janwire.unpack(g)["opcode"] != opcodes.MjRESERVEACK \
                     or g[0x18] != galley.GALLEY_REFUSED or g[0x13] != 0x03:
                 print("FAIL: MjGALLEYREQ must be refused with MjRESERVEACK 7, "
@@ -492,6 +530,26 @@ def selftest():
             if _nm and struct.unpack_from("<Q", _nm[-1], 0x30)[0] != 0:
                 print("FAIL: the lobby notice must leave the EMPTY seat 0 as id "
                       "0 -- the client's occupant count picks the dialog"); ok = False
+
+            # ...but the 2004 build waits on wrsCpTgmMoveRoomCheck (0x393CB0) for
+            # MjMOVEACK (26) with +0x13 = its f13 and +0x18 = 1 (Success).
+            from . import builds as _builds
+            _was = (_builds.IS_2004, _builds.INGAME_2004)
+            _builds.IS_2004, _builds.INGAME_2004 = (lambda: True), True
+            try:
+                if _builds.janmsgs2004 is not None:
+                    _lr4 = janwire.pack(opcode=opcodes.MjLEAVEROOM, f13=0x13, src=1,
+                                        dst=janwire.DST_SERVER & 0xFF, id8=1,
+                                        payload=0x5B01E2BB73B3B60B + 8, length=0x28)
+                    _out4 = dispatch.handle_line(janwire.encode(_lr4 + bytes(8)), member_id=8)
+                    _acks = [janwire.decode(l) for l in (_out4 or []) if l[:1] == b"B"]
+                    _acks = [r for r in _acks if janwire.unpack(r)["opcode"] == opcodes.MjMOVEACK]
+                    if len(_acks) != 1 or _acks[0][0x13] != 0x13 or _acks[0][0x18] != 1:
+                        print("FAIL: a 2004 MjLEAVEROOM must be answered with one MjMOVEACK "
+                              "echoing f13=0x13 with result 1, got %r" % (_out4,)); ok = False
+            finally:
+                _builds.IS_2004, _builds.INGAME_2004 = _was
+            pushqueue._PUSH.clear()
 
             # KICK: 16 is master now; 8 comes back as a guest and is kicked
             _ask(opcodes.MjPLAYREQ, 1, 8, f13=0x09)
@@ -618,6 +676,48 @@ def selftest():
                       "rejoin for jangame"); ok = False
             janseats.clear_in_play(1)
             pushqueue._PUSH.clear()
+
+            # --- A FULL TABLE STARTS ITSELF (live 2026-10-17) ----------------
+            # Four reserves fill table 2; the clients send MjENTERGAME with no
+            # MjGAMESTART. The first one must seat all four from the store.
+            if dispatch.GAMES is not None:
+                dispatch.GAMES.by_lobby.clear(); dispatch.GAMES.by_member.clear(); dispatch.GAMES.tables.clear()
+                _full = (40, 41, 42, 43)
+                for _m in _full:
+                    _ask(opcodes.MjPLAYREQ, 2, _m, f13=0x01)
+                _ftid = janseats.table_of(40)
+                _fseats = {m: s for m, s, _n, _p in janseats.seats_at(_ftid)}
+
+                def _enter(m):
+                    e = janwire.pack(opcode=opcodes.MjENTERGAME, f13=0, src=-3 & 0xFF,
+                                     dst=janwire.DST_SERVER & 0xFF, id8=0,
+                                     payload=0x5B01E2BB73B3B60B + m, length=0x28)
+                    return dispatch.handle_line(janwire.encode(e + bytes(8)), member_id=m)
+
+                _enter(43)
+                _ft = dispatch.GAMES.by_lobby.get(int(_ftid)) if _ftid else None
+                if (len(_fseats) != 4 or _ft is None or _ft.bots
+                        or any(_ft.seat_of_member(m) != _fseats[m] for m in _full)
+                        or any(dispatch.GAMES.by_member.get(m) is not _ft for m in _full)):
+                    print("FAIL: MjENTERGAME at a full table must seat all four "
+                          "from the store: seats %r, table %r" % (_fseats, _ft
+                          and [_ft.seat_of_member(m) for m in _full])); ok = False
+                if not janseats.is_in_play(_ftid):
+                    print("FAIL: a self-started full table must be marked in play")
+                    ok = False
+                for _m in (41, 40, 42):
+                    _enter(_m)
+                if any(janseats.rejoin_pending(m, clear=True) for m in _full):
+                    print("FAIL: the rest of a self-started table must not be "
+                          "flagged as rejoining before the deal"); ok = False
+                if dispatch.GAMES.by_lobby.get(int(_ftid)) is not _ft or _ft.bots:
+                    print("FAIL: later MjENTERGAMEs must not re-seat the table")
+                    ok = False
+                for _m in _full:
+                    janseats.cancel(_ftid, _m)
+                janseats.clear_in_play(_ftid)
+                dispatch.GAMES.by_lobby.clear(); dispatch.GAMES.by_member.clear(); dispatch.GAMES.tables.clear()
+                pushqueue._PUSH.clear()
 
             # --- TWO ROOMS, ONE TABLE NUMBER (finding 30) -------------------
             # Member 8 is JOINed to #MJS0R011 (Room 1-1 = 101), member 16 to
@@ -766,7 +866,9 @@ def selftest():
                         return [janwire.unpack(janwire.decode(l))["opcode"]
                                 for l in (lines or []) if l[:1] == b"B"]
 
-                    # knob off: 7, whatever the table is doing
+                    # knob off (POL_JAN_GALLERY=0, the rollback lever; on is
+                    # the default): 7, whatever the table is doing
+                    galley.GALLERY_ENABLE = False
                     if _watch() != (galley.GALLEY_REFUSED, 0, 0x05):
                         print("FAIL: with POL_JAN_GALLERY off a Watch on a running "
                               "table is still 7, got %r" % (_watch(),)); ok = False

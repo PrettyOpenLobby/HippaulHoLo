@@ -55,11 +55,15 @@ class TableFlow:
         self._pending_ron_from = None
         self.dropped = set()
         self._recorded = False
+        self.departed = {}         # the last game's leavers (disconnect rules)
+        self._end_after_hand = False
+        self._penalty_applied = False
         self.live = set()          # re-added by the drive's seat_player(live=True)
         self.outbox = {}           # nothing from the last hanchan may survive
         self._outgoing = []
         self.sashiuma = None
         self.sashiuma_pairs = []
+        self.readied = set()
         self.timeouts = {}
         self._last_in = {}
         self._last_for = {}
@@ -166,7 +170,7 @@ class TableFlow:
                     break                       # the wall ran out -> finish_draw
                 h = k.hands[seat]
             if seat in self.live:
-                out.append(self.msg_tsumo(seat))
+                out.append(self.msg_tsumo(seat, viewers=True))
                 return out
             # --- a bot's turn ---------------------------------------------
             # WARNING: A BOT'S TURN IS VISIBLE OR IT DIDN'T HAPPEN (2026-09-02,
@@ -197,7 +201,8 @@ class TableFlow:
         bot = self.bots.get(seat) or bots.Bot(seat)
         out = []
         if h.drawn is not None:
-            sc = mj.can_tsumo(h, k.context_for(seat, h.drawn, True))
+            sc = (mj.can_tsumo(h, k.context_for(seat, h.drawn, True))
+                  if getattr(bot, "may_win", True) else None)
             if sc is not None:
                 if not drew_shown:
                     out.append(self.msg_tsumo(seat))    # show the winning draw
@@ -418,6 +423,37 @@ class TableFlow:
         return [self.msg_alldata(),
                 self.msg_tsumo(seat, discard=(tile, slot, seat, riichi))]
 
+    def _show_human_discard(self, seat, tile, slot, riichi=False):
+        """A HUMAN's discard, shown to every OTHER human at the table.
+
+        The discarder's own client animates its discard itself (a motion 3
+        naming its own seat double-appends the pond), so the server used to
+        send nothing at all -- and the other human only saw the tile when the
+        next MjALLDATA arrived, which with seats next to each other was after
+        their OWN discard (live, 2026-10-09, t3 m17/m3). Each other live seat
+        gets the same two records a CPU discard gets, routed to that seat
+        only. Its draw was private (msg_tsumo sends a live seat's draw to that
+        seat alone), so the subtype-3 pop is the draw beat on the viewer's
+        screen, exactly as for a CPU; after a call the client skips the pop.
+
+        Spectators get one copy, not one per viewer.
+        """
+        out = []
+        first = True
+        for o in sorted(self.live):
+            if o == seat:
+                continue
+            if knobs.DISCARD_ANIM == "appear":
+                out.append(self.msg_alldata(to=o, spectate=first))
+            else:
+                out.append(self.msg_alldata(
+                    discard_event=(tile, seat) if knobs.DISCARD_ANIM == "subtype3"
+                    else None, to=o, spectate=first))
+                out.append(self.msg_tsumo(seat, discard=(tile, slot, seat, riichi),
+                                          to=o, spectate=first))
+            first = False
+        return out
+
     # -- the kan family --------------------------------------------------------
 
     def _do_kan(self, seat, kind_, target):
@@ -530,6 +566,7 @@ class TableFlow:
         wins = list(wins)
         self._pending_wins = [(s, sc) for s, sc in wins[1:]]
         self._pending_ron_from = ron_from
+        self._hand_ron_from = ron_from          # the deal-in, for the statistics
         if len(wins) > 1:
             self.trace("DOUBLE RON off %s: %s  [%d win screens, in turn order]"
                        % (self._seatname(ron_from),
@@ -573,8 +610,56 @@ class TableFlow:
         self.trace("DRAW  exhaustive/abort  scores=%s" % list(self.kyoku.scores))
         return [self.msg_draw_reveal(), self.msg_seisan()]
 
+    def _record_hand_stats(self):
+        """The finished hand -> each LIVE seat's 2004 statistics
+        (janstats.record_hand; the page that reads them is described at
+        janstats.HAND_STAT_KEYS). Once per hand, whatever re-acks arrive."""
+        k = self.kyoku
+        if (k is None or k.result is None or janstats is None
+                or not knobs.STATS_ENABLE
+                or getattr(self, "_hand_stats_for", None) is k):
+            return
+        self._hand_stats_for = k
+        kind, detail = k.result
+        winners = {}
+        if kind in (mj.TSUMO, mj.RON):
+            for seat, sc in detail or ():
+                winners[seat] = sc
+        ron_from = getattr(self, "_hand_ron_from", None)
+        if ron_from is None and kind == mj.RON:
+            ron_from = k.last_discard_seat
+        for seat in sorted(self.live):
+            member = self.member_of_seat(seat)
+            if not member:
+                continue
+            h = k.hands[seat]
+            called = any(m.kind != mj.ANKAN for m in h.melds)
+            sc = winners.get(seat)
+            try:
+                janstats.record_hand(
+                    member, won=sc is not None, tsumo=kind == mj.TSUMO,
+                    points=int(getattr(sc, "points", 0) or 0) if sc is not None else 0,
+                    dealt_in=(kind == mj.RON and ron_from == seat
+                              and seat not in winners),
+                    riichi=bool(h.riichi),
+                    riichi_junme=(h.riichi_index + 1) if h.riichi else 0,
+                    called=called)
+            except Exception as e:
+                self.log.append(("stats-error", "hand seat %d: %s: %s"
+                                 % (seat, type(e).__name__, e)))
+        self._hand_ron_from = None
+
     def next_kyoku_or_end(self):
+        self._record_hand_stats()
         over = self.game.end_kyoku()
+        if not over and getattr(self, "_end_after_hand", False):
+            # DISCONNECT_MODE "quit" (janrules): a seat left mid-game and the
+            # table's rule ends the game when the hand it left in is over --
+            # settled the way any other end is (leftover sticks, yakitori).
+            self.game.end_reason = "disconnect"
+            self.game.finished = True
+            self.game._final_adjust()
+            over = True
         if over:
             return [self.msg_results()]
         return self.start_kyoku()

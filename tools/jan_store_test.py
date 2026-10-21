@@ -59,22 +59,32 @@ def migrations(janstore):
     print("migrations")
     from polcore import db
     applied = db.migrate(directory=janstore.MIGRATIONS_DIR, log=lambda m: None)
-    check("HippaulHoLo's set applies on an empty database", applied == ["4001_jan_state"],
+    check("HippaulHoLo's set applies on an empty database", applied == ["4001_jan_state", "4002_jan_room_keys"],
           applied)
     tables = {r["table_name"] for r in db.query(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")}
     check("...creating its jan_ tables",
-          {"jan_event", "jan_rank_snapshot", "jan_board_state"} <= tables, tables)
+          {"jan_event", "jan_rank_snapshot", "jan_board_state", "jan_room_keys"} <= tables,
+          tables)
     core = db.migrate(log=lambda m: None)
     names = [n for _v, n, _p in db.migration_files()]
     check("OpenLobby's own set still applies afterwards, every file of it",
           core == names and len(names) >= 1, (core, names))
     have = db.applied_migrations()
     check("both sets share schema_migrations without a clash",
-          4001 in have and all(v < 1000 for v in have if v != 4001), sorted(have))
+          4001 in have and 4002 in have
+          and all(v < 1000 or 4001 <= v <= 4999 for v in have), sorted(have))
     again = (db.migrate(directory=janstore.MIGRATIONS_DIR, log=lambda m: None),
              db.migrate(log=lambda m: None))
     check("a second run of either set applies nothing", again == ([], []), again)
+    # The room-key map's durable copy (janlobby): a binding survives a Valkey
+    # loss because it is read back from here.
+    import janlobby
+    janlobby._keymap_db_save({264073401548: "#MJS0R011"})
+    janlobby._keymap_db_save({264073401548: "#MJS0R011", 7: "#MJS0R023"})
+    check("jan_room_keys keeps each learned binding once, re-learning included",
+          janlobby._keymap_db_load() == {"264073401548": "#MJS0R011", "7": "#MJS0R023"},
+          janlobby._keymap_db_load())
 
 
 def event(janevent, janstore):

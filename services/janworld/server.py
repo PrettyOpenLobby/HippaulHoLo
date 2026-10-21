@@ -11,6 +11,14 @@ HOST = os.environ.get("POL_JAN_HOST", "0.0.0.0")
 
 
 class Handler(socketserver.StreamRequestHandler):
+    #: socketserver puts this on the accepted socket, so a client that goes
+    #: quiet for five minutes ends its thread (recv raises socket.timeout,
+    #: caught below) instead of holding it forever. The in-game client talks
+    #: every ~2 s. Seats and tables are released by the auth band's
+    #: session_closed hook (jantitle), keyed by member id; this harness has
+    #: no member id, so there is nothing of its own to free here.
+    timeout = 300
+
     def handle(self):
         peer = "%s:%d" % self.client_address
         wirelog.log("%s connected" % peer)

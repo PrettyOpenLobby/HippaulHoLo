@@ -46,10 +46,10 @@ Live capture agrees: 2026-08-16 "opcode 13, len 112, seq 0x21, sub 0x05".
 === VALUE SEMANTICS (the label arrays at JanHouRou.pex 0x40be50) =============
 
 Dumped 2026-09-04 from the decrypted module, English from the translated
-build; index == the value byte. Only the rules the ENGINE has a field for are
-mapped into `janmahjong.Rules`; the rest are served back to the dialog and
-kept for whoever adds them (IPPATSU/NOTEN/PINZUMO/YAKITORI/REACH_AFTER_KAN are
-listed in `ENGINE_UNMAPPED` so the gap is visible, not silent).
+build; index == the value byte. The 19 mahjong rules (dialog A, indexes
+0..18) all reach `janmahjong.Rules` through `Rules.from_config`; the 14 table
+rules (dialog B) are not engine rules and are played by the table layer
+instead (`TABLE_LAYER` names each one with the module that plays it).
 
     GENTEN   10000 15000 20000 25000 27000 30000
     RENCHAN  E:win S:win | E:win S:tenpai | E:win S:noten | E:tenpai S:tenpai
@@ -128,13 +128,28 @@ YAKITORI_POINTS = (0, 5, 10, 20)
 DISCONNECT_MODES = ("proxy", "tsumogiri", "quit")
 DISCONNECT_PENALTY_POINTS = (0, 10000, 20000, 30000)
 
-#: Rules the client offers that `janmahjong.Rules` has NO field for today.
-#: Served back to the dialog faithfully; not played. Listed so the gap is a
-#: fact in one place rather than a surprise on the table.
-ENGINE_UNMAPPED = ("IPPATSU", "NOTEN", "PINZUMO", "YAKITORI", "REACH_AFTER_KAN",
-                   "AKA_KIND", "TABLE_COMMENT", "GALLEY_LIMIT", "LIMIT_PASS_WORD",
-                   "LIMIT_MONEY", "LIMIT_LEVEL", "LIMIT_SYOGO1", "LIMIT_SYOGO2",
-                   "LIMIT_SYOGO3", "LIMIT_SYOGO4", "LIMIT_SYOGO5")
+#: The rules `janmahjong.Rules` has NO field for, and who plays each one
+#: instead. These are the TABLE rules of dialog B; every mahjong rule of dialog
+#: A (IPPATSU, NOTEN, PINZUMO, YAKITORI, REACH_AFTER_KAN and AKA_KIND included)
+#: is mapped by `Rules.from_config` and played by the engine. WAIT_TIME is the
+#: one dialog-B rule the engine also reads (the turn clock), so it is not here.
+TABLE_LAYER = {
+    "TABLE_COMMENT": "janlobby (served back to the dialog and the row)",
+    "GALLEY_LIMIT": "janworld.galley",
+    "DISCONNECT_MODE": "jantable.table (drop_seat)",
+    "DISCONNECT_ADJUST": "jantable.tableresults",
+    "DISCONNECT_PENALTY": "jantable.tableresults",
+    "LIMIT_PASS_WORD": "janworld.dispatch (reserve) and janworld.galley",
+    "LIMIT_MONEY": "janworld.reservelimits",
+    "LIMIT_LEVEL": "janworld.reservelimits",
+    "LIMIT_SYOGO1": "janworld.reservelimits",
+    "LIMIT_SYOGO2": "janworld.reservelimits",
+    "LIMIT_SYOGO3": "janworld.reservelimits",
+    "LIMIT_SYOGO4": "janworld.reservelimits",
+    "LIMIT_SYOGO5": "janworld.reservelimits",
+}
+#: Kept under its old name for readers; it is the table-layer list now.
+ENGINE_UNMAPPED = tuple(TABLE_LAYER)
 
 _LOCK = threading.RLock()
 _TABLES = {}                    # table id (str) -> {"values": {name: int}, ...}
@@ -271,6 +286,23 @@ def password_for(table_id):
         return ""
     entry = (_live_tables() or {}).get(str(int(table_id or 0))) or {}
     return str(entry.get("text") or "")
+
+
+def table_password(table_id):
+    """The password a reserver (or a spectator) must give for `table_id`, or
+    "" when the table has none: LIMIT_PASS_WORD (rule 25) switched to Yes AND a
+    non-empty text stored from the master's MjTBLCONFALL +0x5a. The one test
+    every gate shares -- the reserve (result 9), the Watch (result 9) and the
+    PTL row's HasPassword field, which is what makes the 2004 client open
+    TablePasswordInput before it reserves."""
+    if not enabled():
+        return ""
+    try:
+        if not int(values_for(table_id).get("LIMIT_PASS_WORD") or 0):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return password_for(table_id)
 
 
 def values_for(table_id):

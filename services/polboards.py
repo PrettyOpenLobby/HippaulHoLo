@@ -49,11 +49,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # cannot see a lazy import inside a function.
 import polgateway
 
+try:                                                  # the admin page's bot registry
+    from polcore import botcreds
+except ImportError:                                   # an image without the core
+    botcreds = None
+
 #: board name -> module. Each gets --<name>-port; 0 leaves it off.
 BOARDS = {"jan": "boardjan", "fmo": "boardfmo", "tm": "boardtm",
           "ffxi": "boardffxi", "doc": "boarddoc", "fe": "boardfe"}
 if False:                                             # pragma: no cover
-    # NEVER RUNS. Boards load BY NAME (importlib), which deploy/pol-stale-check's
+    # NEVER RUNS. Boards load BY NAME (importlib), which a deploy script's
     # ast import closure cannot see -- the femap lesson of the same day: a
     # board-only push would restart nothing. KEEP THIS == BOARDS.
     import boardjan  # noqa: F401
@@ -1321,11 +1326,49 @@ def build_parser():
     return ap
 
 
+def use_registry(args, names):
+    """The admin page's bot registry (polcore/botcreds.py, table discord_bot)
+    over the flags and environment: a value the registry holds wins, a value
+    it does not hold stays as the environment gave it, so a bot nobody moved
+    keeps running as before. Each board says what it runs on in Valkey
+    (botcreds:applied:<name>) for the admin page, and a watcher exits the
+    process when one of these rows changes: the container restarts on the new
+    values (a token is baked into Gateway sockets and feed threads)."""
+    if botcreds is None or not names:
+        return None
+    for name in names:
+        try:
+            row = botcreds.get(name)
+        except Exception as e:                         # noqa: BLE001 no db / table yet
+            print("[polboards] %s: bot registry not readable (%s); using the environment"
+                  % (name, type(e).__name__), flush=True)
+            row = None
+        for field, attr in (("token", "%s_discord_bot_token"), ("app_id", "%s_discord_app_id"),
+                            ("public_key", "%s_discord_public_key"), ("url", "%s_url")):
+            if row and row.get(field):
+                setattr(args, attr % name, row[field])
+        token = (getattr(args, "%s_discord_bot_token" % name, "") or "").strip()
+        source = "registry" if row and row.get("token") else ("env" if token else "")
+        if row and row.get("has_token") and not row.get("token"):
+            print("[polboards] %s: the registry's token cannot be unsealed here (POL_BOT_KEY "
+                  "missing or different); using the environment" % name, flush=True)
+        try:
+            from polcore import kv
+            kv.set_json("botcreds:applied:%s" % name, {
+                "source": source, "at": time.time(),
+                "app_id": (getattr(args, "%s_discord_app_id" % name, "") or "").strip(),
+                "row_at": float((row or {}).get("updated_at") or 0)})
+        except Exception:                              # noqa: BLE001 no Valkey: no report
+            pass
+    return botcreds.watch(names, label="polboards")
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     started = []
     if _state_db():
         janstore.migrate_at_start("polboards")
+    use_registry(args, [n for n in BOARDS if int(getattr(args, "%s_port" % n) or 0)])
     for name, modname in BOARDS.items():
         port = int(getattr(args, "%s_port" % name) or 0)
         if not port:

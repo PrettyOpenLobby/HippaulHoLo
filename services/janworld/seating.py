@@ -43,7 +43,10 @@ def display_name(member_id, nick=None):
     except (TypeError, ValueError):
         mid = 0
     if mid <= 0:
-        return "" if not nick or nick in ("-", "auth-band") else str(nick)
+        # The auth band's peer is `auth-band` or `auth-band[m3 PS2/P2U ...]`
+        # (jantitle._jan_auth_peer): a transport label, never a name.
+        return ("" if not nick or nick == "-" or str(nick).startswith("auth-band")
+                else str(nick))
     if mid in _NAME_CACHE:
         return _NAME_CACHE[mid]
     name = ""

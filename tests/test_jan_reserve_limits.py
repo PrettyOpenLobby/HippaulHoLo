@@ -3,7 +3,7 @@
 
     python tests/test_jan_reserve_limits.py
 
-POL_JAN_RESERVE_LIMITS=1 turns it on (default off). Result 10 is the client's
+POL_JAN_RESERVE_LIMITS=0 turns it off (default on since 2026-10-08). Result 10 is the client's
 "Entry limits not met. Cannot reserve"; the +0x19 bitfield order (money,
 level, title) is Project Crystal Server's label, unverified. Temp dirs only,
 and the player records are rows of a throwaway database (tools/janpg.py).
@@ -62,9 +62,12 @@ def ask(table, member, op=jh.MjPLAYREQ):
                        dst=janwire.DST_SERVER & 0xFF, id8=table,
                        payload=0x5B01E2BB73B3B60B + member)
     out = jh.handle_line(janwire.encode(req), member_id=member)
-    if isinstance(out, (list, tuple)):
-        out = out[0] if out else None
-    rec = janwire.decode(out) if isinstance(out, bytes) else None
+    # The reply is the MjRESERVEACK; a lobby notice queued for this member
+    # (MjNOTICECALL when somebody joins their table) rides the same line, ahead
+    # of it, on the client's notice queue.
+    recs = [janwire.decode(o) for o in (out if isinstance(out, (list, tuple))
+                                        else [out]) if isinstance(o, bytes)]
+    rec = next((r for r in recs if r[0x12] == jh.MjRESERVEACK), None)
     return (rec[0x18], rec[0x19]) if rec else None
 
 
@@ -88,7 +91,8 @@ tid = jh._table_for(MASTER, 1)
 janrules.store(tid, {"LIMIT_MONEY": 1, "LIMIT_LEVEL": 1, "LIMIT_SYOGO1": 1},
                by=MASTER)
 
-print("knob off (default): limits are not enforced")
+print("knob off (POL_JAN_RESERVE_LIMITS=0): limits are not enforced")
+os.environ["POL_JAN_RESERVE_LIMITS"] = "0"
 chk("poor member seats", ask(1, POOR)[0], janseats.RESERVE)
 ask(1, POOR, op=jh.MjPLAYCANCEL)
 

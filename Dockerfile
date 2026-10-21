@@ -28,3 +28,8 @@ RUN python -c "import sys, live_sessions; hasattr(live_sessions, 'marker_key') o
 EXPOSE 51272
 
 ENV POL_TITLES=jantitle
+
+# login, authsess and the parlour listener (51272) bind nothing below 1024,
+# so this runs as the unprivileged uid that owns the /data and /logs bind
+# mounts (the core image creates it).
+USER 1000

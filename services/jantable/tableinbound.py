@@ -182,6 +182,7 @@ class TableInbound:
         if op == M.MjREADY:
             if seat is not None and seat not in self.bots:
                 self.live.add(seat)
+                self.readied.add(seat)
             elif seat is not None:
                 # A READY stamped with a bot's seat (audit probe P5): it used
                 # to make that bot a "live" seat and wait on it for ever.
@@ -220,7 +221,8 @@ class TableInbound:
             return self.on_nakiack(rec, seat=seat)
 
         if op == M.MjYAKUDISPACK:
-            if self._awaiting and self._awaiting[0] == M.MjYAKUDISP:
+            if (self._awaiting and self._awaiting[0] == M.MjYAKUDISP
+                    and self._every_human_acked(seat)):
                 return self._ack_advance(M.MjYAKUDISP)
             return []
 
@@ -238,9 +240,21 @@ class TableInbound:
             # the ladder record stays the LAST thing in a reply, which is
             # what the transport re-nudges and what a client answers (the
             # gauge record drains on its own sub and is never acked).
+            # WARNING: DEAL ONLY ONCE EVERY HUMAN HAS ACKED (2026-10-09, live). The
+            # first ack used to deal at once: the other human was still on
+            # the results screen, and the faster one got a "not everyone is
+            # ready" gauge, the deal, and the "everyone is ready" gauge in one
+            # batch (the 0.7 s deal hold let the second ack land in between).
+            # Its client kept the first gauge, held Next greyed, and only went
+            # on when its own 60 s results countdown ran out. Now each ack
+            # moves the gauge, and the ack that completes it deals.
             ready = self._ready_status(seat)
+            if seat is not None and seat not in self.bots:
+                self._seisan_ready.add(seat)    # _ready_status skips it when ISHUMAN is off
             if self._awaiting and self._awaiting[0] == M.MjSEISAN:
-                return ready + (self._ack_advance(M.MjSEISAN) or [])
+                humans = [s for s in self.live if s not in self.bots]
+                if all(s in self._seisan_ready for s in humans):
+                    return ready + (self._ack_advance(M.MjSEISAN) or [])
             return ready
 
         if op == M.MjALLDATA or op == M.MjALLDATAACK:
@@ -258,12 +272,14 @@ class TableInbound:
         # ack gets silence. A record the client never got is re-sent by the
         # deadline sweeper (`tick`: once, then the ladder proceeds).
         if op == M.MjGAMERESULTHALF1ACK:
-            if self._awaiting and self._awaiting[0] == M.MjGAMERESULTHALF1:
+            if (self._awaiting and self._awaiting[0] == M.MjGAMERESULTHALF1
+                    and self._every_human_acked(seat)):
                 return self._ack_advance(M.MjGAMERESULTHALF1)
             return []
 
         if op == M.MjGAMERESULTHALF2ACK:
-            if self._awaiting and self._awaiting[0] == M.MjGAMERESULTHALF2:
+            if (self._awaiting and self._awaiting[0] == M.MjGAMERESULTHALF2
+                    and self._every_human_acked(seat)):
                 return self._ack_advance(M.MjGAMERESULTHALF2)
             return []
 
@@ -302,6 +318,15 @@ class TableInbound:
             if (self.state == "playing" and seat is not None
                     and seat in self.live and len(self.live) > 1):
                 return self.drop_seat(seat, "quit (MjBYE)")
+            # WARNING: THE LEAVER'S CLIENT RE-SENDS ITS MjBYE (~2 s). The retry
+            # comes from a seat drop_seat already gave to a bot, so it is not
+            # live and used to fall through to _finish below: the whole table
+            # ended under the human still playing (seen live: the
+            # second BYE finished it and left the other player stranded).
+            if (self.state == "playing" and seat is not None
+                    and seat in self.dropped and seat not in self.live):
+                self.log.append(("bye-retry-dropped-seat", seat))
+                return []
             if self.state == "over":
                 if seat is not None:
                     self._byes.add(seat)
@@ -339,6 +364,23 @@ class TableInbound:
         if seat is None or seat not in self.live:
             self.log.append(("refused-sute", (seat, "not a live seat")))
             return self._renudge(seat)
+        # A STALE DISCARD (2026-10-09): +0x13 names the MjTSUMO the client was
+        # answering (console.c:3423 copies DAT_00409b10, the sequence byte it
+        # adopted from that record at :4377). After a deadline played this
+        # seat's turn, the client is still on the OLD draw with the timeout's
+        # records queued behind it, so its discard names a superseded record.
+        # Applying it moved the CURRENT draw's slot (live 16:10:25Z t2: the
+        # answer to draw 5 discarded the 5p of draw 12) and left the seat one
+        # turn behind for the rest of the hand. Say nothing: the queued
+        # MjALLDATA records carry the real hand and pond, and the client
+        # answers the current draw next. An identical re-send of this line
+        # takes handle()'s replay path, which re-nudges.
+        want = self._turn_seq.get(seat)
+        if want is not None and p["seq"] != want:
+            self.log.append(("stale-sute", (seat, p["seq"], want)))
+            self.trace("IGNORED stale discard from %s -- it answers record %d, "
+                       "the current draw is %d" % (self._seatname(seat), p["seq"], want))
+            return []
         h = k.hands[seat]
         if k.turn != seat or h.tile_total() != 14 or k.pending_kan is not None:
             self.log.append(("refused-sute", (seat, "not this seat's move: turn=%d "
@@ -420,7 +462,9 @@ class TableInbound:
                    % (self._seatname(seat), narration._tile(tile), idx,
                       " RIICHI" if act == M.SUTE_RIICHI else ""))
         k.discard(seat, tile=tile, riichi=(act == M.SUTE_RIICHI))
-        return self._continue(tile, seat)
+        shown = self._show_human_discard(seat, tile, idx,
+                                         riichi=(act == M.SUTE_RIICHI))
+        return shown + self._continue(tile, seat)
 
     def on_nakiack(self, rec, seat=None):
         k = self.kyoku

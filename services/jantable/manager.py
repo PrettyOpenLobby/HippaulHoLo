@@ -105,6 +105,19 @@ class Manager(object):
         except Exception:
             return None
 
+    @staticmethod
+    def disconnect_for(key):
+        """(mode, adjust, penalty) the master chose for a lobby table
+        (`janrules.disconnect_policy`), or None for the dialog's defaults."""
+        if janrules is None or not hasattr(janrules, "disconnect_policy"):
+            return None
+        try:
+            if hasattr(janrules, "enabled") and not janrules.enabled():
+                return None
+            return janrules.disconnect_policy(key)
+        except Exception:
+            return None
+
     def table_for_lobby(self, lobby_id, members, nick=None, reset=True,
                         room=None):
         """The in-game table for one LOBBY table, seating everyone really there.
@@ -146,6 +159,7 @@ class Manager(object):
                     chan = b"#MJS0T%03d" % (base or tid)
                 t = self._adopt(table.Table(tid, channel=chan,
                                       rules=self.rules_for(key)))
+                t.disconnect = self.disconnect_for(key)
                 t.lobby_key = key
                 self.tables[tid] = t
                 self.by_lobby[key] = t
@@ -161,6 +175,7 @@ class Manager(object):
             if reset:
                 t.reset_for_new_game()
                 t.rules = self.rules_for(key) or t.rules
+                t.disconnect = self.disconnect_for(key)
             t.seats = [None] * 4
             t.nicks = [None] * 4
             t.members = {}
@@ -417,6 +432,7 @@ class Manager(object):
         a lost record (finding 9). With one live seat the old behaviour (the
         caller gets it) is safe and kept.
         """
+        records = t.expand_riders(records)
         by_id = {id(r): to for r, to in routes}
         unrouted = [r for r in records if id(r) not in by_id]
         if unrouted:
@@ -488,27 +504,72 @@ class Manager(object):
                 # used to hand its records back to a caller that had, in its
                 # own words, "no peer to send it to on this path", and dropped
                 # them. The table's state moved on and NOBODY WAS EVER TOLD.
-                by_id = {id(r): to for r, to in routes}
-                unrouted = [r for r in recs if id(r) not in by_id]
-                if unrouted:
-                    # Routes do not describe these records, so we cannot say
-                    # who each one is FOR -- and a private hand sent to the
-                    # wrong seat is worse than a late one. Log it as the bug
-                    # it is and queue only what IS described.
-                    t.log.append(("tick-route-bypass", len(unrouted)))
-                for r in recs:
-                    to = by_id.get(id(r), False)
-                    if to is False:
-                        continue
-                    for seat in sorted(t.live):
-                        if to is None or to == seat:
-                            t.queue_for(seat, r)
-                # (the spectators' copies were queued by `_emit` itself)
+                self._queue_records(t, recs, routes, "tick-route-bypass")
                 out.append((t, recs))
             self._release_galleries()
             self._reap()
             self._write_watch()
             return out
+
+    @staticmethod
+    def _queue_records(t, recs, routes, bypass_tag):
+        """Queue records nobody's line will carry into the live seats' outboxes."""
+        recs = t.expand_riders(recs)
+        by_id = {id(r): to for r, to in routes}
+        unrouted = [r for r in recs if id(r) not in by_id]
+        if unrouted:
+            # Routes do not describe these records, so we cannot say
+            # who each one is FOR -- and a private hand sent to the
+            # wrong seat is worse than a late one. Log it as the bug
+            # it is and queue only what IS described.
+            t.log.append((bypass_tag, len(unrouted)))
+        for r in recs:
+            to = by_id.get(id(r), False)
+            if to is False:
+                continue
+            for seat in sorted(t.live):
+                if to is None or to == seat:
+                    t.queue_for(seat, r)
+        # (the spectators' copies were queued by `_emit` itself)
+
+    def member_gone(self, member_id, reason="connection closed"):
+        """The member's connection is gone: hand their seat to a CPU now.
+
+        Without this a crashed player's seat was only dropped by the sweeper,
+        after TIMEOUTS_TO_DROP missed deadlines (about four minutes), and only
+        while it was that seat's turn. A watcher is just forgotten. Returns the
+        Table the member was at, or None.
+        """
+        try:
+            member_id = int(member_id)
+        except (TypeError, ValueError):
+            return None
+        if member_id <= 0:
+            return None
+        if self.spectator_table(member_id) is not None:
+            return self.forget_spectator(member_id, why=reason)
+        with self._lock:
+            t = self.by_member.get(member_id)
+            if t is None:
+                return None
+            seat = t.seat_of_member(member_id)
+            if seat is None or seat not in t.live or t.state != "playing":
+                return t
+            t.begin_routing()
+            recs = t.drop_seat(seat, reason)
+            self._queue_records(t, recs, t.take_routes(), "gone-route-bypass")
+            members = sorted(m for m, s in t.members.items()
+                             if s in t.live and t.outbox.get(s))
+            self._release_galleries()
+            self._reap()
+            self._write_watch()
+            if members and self.on_swept is not None:
+                try:
+                    self.on_swept(members)
+                except Exception as e:
+                    narration._trace("member_gone push hook raised %s: %s"
+                                     % (type(e).__name__, e))
+            return t
 
     def watch_tables(self):
         """{lobby key: {"watchable": bool, "state": ...}} for every table in a

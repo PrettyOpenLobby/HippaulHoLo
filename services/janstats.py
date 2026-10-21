@@ -350,6 +350,14 @@ def blank(member_id=None):
         "history": [],
         #: Anything here wins over `derive()`. See `set_override`.
         "overrides": {},
+        #: Per-HAND counts for the 2004 statistics page (HAND_STAT_KEYS,
+        #: `record_hand`).
+        "hand_stats": {},
+        #: Mid-game exits under the table's disconnect rules, the penalty
+        #: points they carried, and the last one (`record_disconnect`).
+        "disconnects": 0,
+        "penalty_points": 0,
+        "last_disconnect": None,
     }
 
 
@@ -382,7 +390,7 @@ def load(member_id):
         rec["places"] = [0, 0, 0, 0]
     if not isinstance(rec.get("history"), list):
         rec["history"] = []
-    for k in ("overrides", "yaku", "titles"):
+    for k in ("overrides", "yaku", "titles", "hand_stats"):
         if not isinstance(rec.get(k), dict):
             rec[k] = {}
     if not isinstance(rec.get("last_titles"), list) or len(rec["last_titles"]) != 5:
@@ -569,6 +577,82 @@ def record_win(member_id, yaku_names=(), yakuman=False, when=None):
     return rec
 
 
+#: THE 2004 STATISTICS PAGE (measured 2026-10-08, fn_0032fcc0 in the 2004
+#: module). Ten u32 the 2004 save carries at +0x2B4..+0x2F0 and the 2002 one
+#: does not (jansave.STATS_2004 has the offsets). The page prints rates and
+#: averages FROM them, so each one is a plain count or sum:
+#:
+#:   hands         局数, the denominator of 振込率, リーチ率, 和了率, 副露率
+#:   wins          和了率 = wins / hands; 和了平均点数 = win_points / wins
+#:   win_max       和了最高点数 (the best single win, points)
+#:   win_points    the sum the average is taken from
+#:   tsumo_wins    ツモ:ロン比率 = tsumo_wins / wins as %d:%d
+#:   deal_ins      振込率 = deal_ins / hands (dealt into somebody's ron)
+#:   riichi        リーチ率 = riichi / hands; リーチ成功率 = (the riichi and
+#:                 double-riichi yaku counters +0x11C/+0x120) / riichi
+#:   riichi_junme  平均リーチ巡目 = riichi_junme / riichi (the turn it was
+#:                 declared on, summed)
+#:   called_hands  副露率 = called_hands / hands (an open meld in the hand)
+#:   called_wins   副露成功率 = called_wins / called_hands
+HAND_STAT_KEYS = ("hands", "wins", "win_max", "win_points", "tsumo_wins",
+                  "deal_ins", "riichi", "riichi_junme", "called_hands",
+                  "called_wins")
+
+
+def record_hand(member_id, won=False, tsumo=False, points=0, dealt_in=False,
+                riichi=False, riichi_junme=0, called=False):
+    """One finished HAND (kyoku) for a human seat -> the ten 2004 statistics.
+
+    Called once per hand per live seat by the table when the hand settles
+    (jantable.tableflow `_record_hand_stats`). Returns the record, or None
+    for a bot / no id."""
+    if not member_id or is_bot_id(member_id):
+        return None
+    rec = load(member_id)
+    st = rec.setdefault("hand_stats", {})
+    for k in HAND_STAT_KEYS:
+        st[k] = int(st.get(k, 0) or 0)
+    st["hands"] += 1
+    if won:
+        st["wins"] += 1
+        pts = max(0, int(points))
+        st["win_points"] += pts
+        st["win_max"] = max(st["win_max"], pts)
+        if tsumo:
+            st["tsumo_wins"] += 1
+        if called:
+            st["called_wins"] += 1
+    if dealt_in:
+        st["deal_ins"] += 1
+    if riichi:
+        st["riichi"] += 1
+        st["riichi_junme"] += max(0, int(riichi_junme))
+    if called:
+        st["called_hands"] += 1
+    store(member_id, rec)
+    return rec
+
+
+def record_disconnect(member_id, penalty=0, mode="proxy", table_id=None,
+                      when=None):
+    """A mid-game exit under the table's disconnect rules (途中退場).
+
+    Counts it (`disconnects`), keeps the penalty points it carried
+    (`penalty_points`) and the last one's details. The penalty's effect on
+    the SCORE is the results screen's business (jantable.tableresults); this
+    is the record of it. Returns the record, or None for a bot / no id."""
+    if not member_id or is_bot_id(member_id):
+        return None
+    rec = load(member_id)
+    rec["disconnects"] = int(rec.get("disconnects", 0) or 0) + 1
+    rec["penalty_points"] = int(rec.get("penalty_points", 0) or 0) + max(0, int(penalty))
+    rec["last_disconnect"] = {"penalty": max(0, int(penalty)), "mode": str(mode),
+                              "table": table_id,
+                              "t": int(when if when is not None else time.time())}
+    store(member_id, rec)
+    return rec
+
+
 def recent_places(member_id_or_rec, n=HISTORY_ROWS, skip=0):
     """The last `n` placings, newest first, padded with `NO_RANK`.
 
@@ -627,6 +711,17 @@ TITLE_WEIGHTS = {"mahjong_king": 1.0, "beast_king": 5.0, "winnings_general": 0.5
 #: 65 白虎, 70 朱雀, 75 玄武, 80 麒麟, 85 鳳凰, 90 雀神 Jan God. Variants:
 #: 0 plain, 1 "rich", 2 "lonely/sad", 3 "lucky/rare", 4 "lazy/top-5%".
 RANK_TIERS, RANK_VARIANTS, RANK_MAX = 19, 5, 94
+#: THE 2004 BUILD'S LADDER IS 19 x 7, NOT 19 x 5. Its only rank-name lookup,
+#: fn_003925f0 (2004 module, base 0x280000), indexes PTR_DAT_00485930 as
+#: `(i / 7) * 7 + i % 7` for 0..0x84 and returns "" past it. Each tier is four
+#: names (plain, rich, sad, lucky) then three slots that all point at the empty
+#: string 0x4a73c0; the 2002 variant 4 (yaru-ki nai) is gone from that build.
+#: Every 2004 screen that draws a rank (handle panel, record screen, rankings,
+#: profile popup: 8 call sites) goes through it, so a 2002 index served to a
+#: 2004 client named the wrong tier or nothing at all (member 3's rank 6, tier 1
+#: "rich", read as tier 0's third spare, 2026-10-11). Same ladder as the
+#: Viewer's (jantitle._jan_viewer_rank).
+RANK_VARIANTS_2004, RANK_NAMED_2004, RANK_MAX_2004 = 7, 4, 132
 #: PARTIAL: Games per tier in the placeholder ladder.
 RANK_TIER_GAMES = int(os.environ.get("POL_JAN_RANK_TIER_GAMES", "5"))
 
@@ -708,6 +803,16 @@ def rank_index_of(rec):
     return min(RANK_MAX, tier * RANK_VARIANTS + variant)
 
 
+def rank_index_2004(idx):
+    """A `rank_index_of` value as the 2004 build indexes it (RANK_VARIANTS_2004).
+    That build has no name for variant 4, so it falls back to the tier's plain
+    name rather than a blank spare."""
+    tier, variant = divmod(max(0, min(RANK_MAX, int(idx))), RANK_VARIANTS)
+    if variant >= RANK_NAMED_2004:
+        variant = 0
+    return min(RANK_MAX_2004, tier * RANK_VARIANTS_2004 + variant)
+
+
 def money_of(rec, key="result_x10"):
     return jan_for_points(int(rec.get(key, 0)) / 10.0)
 
@@ -765,6 +870,12 @@ def derive(rec):
     yaku = rec.get("yaku") or {}
     for key in YAKU_OFFSETS:
         out["yaku_" + key] = int(yaku.get(key, 0))
+    hs = rec.get("hand_stats") or {}
+    for key in HAND_STAT_KEYS:
+        try:
+            out["hand_" + key] = max(0, int(hs.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            out["hand_" + key] = 0
     for k, v in (rec.get("overrides") or {}).items():
         if k in out and k not in ("level", "rank"):    # those two already applied
             try:
@@ -1028,6 +1139,12 @@ def all_members():
     return sorted(out)
 
 
+#: _snapshot_load's last result, keyed by the scope and the table's newest
+#: updated_at plus row count: the rows are read again only when one of those
+#: moved. Every rank list used to read the whole table.
+_SNAPSHOT_CACHE = {"key": None, "data": {}}
+
+
 def _snapshot_load():
     """{category (str): [member, ...]} as last remembered, or {} (also when the
     database cannot be reached: every row then reads as new)."""
@@ -1035,6 +1152,12 @@ def _snapshot_load():
     try:
         import janstore
         janstore.ensure_schema()
+        stamp = janstore.db.query(
+            "SELECT max(updated_at) AS t, count(*) AS n FROM jan_rank_snapshot"
+            " WHERE left(category, %s) = %s", (len(scope), scope))
+        key = (scope, stamp[0]["t"], stamp[0]["n"]) if stamp else (scope, None, 0)
+        if key == _SNAPSHOT_CACHE["key"]:
+            return dict(_SNAPSHOT_CACHE["data"])
         rows = janstore.db.query("SELECT category, data FROM jan_rank_snapshot"
                                  " WHERE left(category, %s) = %s", (len(scope), scope))
     except Exception:                                       # noqa: BLE001
@@ -1044,6 +1167,7 @@ def _snapshot_load():
         cat = r["category"][len(scope):]
         if cat.isdigit() and isinstance(r["data"], list):
             out[cat] = r["data"]
+    _SNAPSHOT_CACHE["key"], _SNAPSHOT_CACHE["data"] = key, dict(out)
     return out
 
 
@@ -1115,9 +1239,14 @@ def rank_list(category, limit=RANK_LIST_MAX, names=None, content_ids=None,
     return rows
 
 
-def rank_list_blob(category, limit=RANK_LIST_MAX, names=None, content_ids=None):
-    """The `U/g/MJS_RANKLIST<n>` bytes: N x 232, already in rank order."""
+def rank_list_blob(category, limit=RANK_LIST_MAX, names=None, content_ids=None,
+                   build_2004=False):
+    """The `U/g/MJS_RANKLIST<n>` bytes: N x 232, already in rank order.
+    `build_2004` re-indexes each row's rank (v26) for that build's ladder."""
     rows = rank_list(category, limit=limit, names=names, content_ids=content_ids)
+    if build_2004:
+        for _m, f in rows:
+            f[26] = rank_index_2004(f.get(26, 0))
     return b"".join(pack_profile(f) for _m, f in rows)
 
 
@@ -1237,6 +1366,10 @@ def selftest():
                     "an override wins, on both APIs")
         set_override(9, "level", None)
         ok &= check(derive(load(9))["level"] == 1, "and clears")
+        ok &= check([rank_index_2004(i) for i in (0, 3, 4, 6, 9, 94)]
+                    == [0, 3, 0, 8, 7, 126],
+                    "2002 ranks re-index onto the 2004 19x7 ladder, variant 4 "
+                    "-> plain: %r" % [rank_index_2004(i) for i in (0, 3, 4, 6, 9, 94)])
         set_override(9, "rank", 94)
         ok &= check(derive(load(9))["rank"] == 94, "a rank override wins")
         set_override(9, "rank", None)

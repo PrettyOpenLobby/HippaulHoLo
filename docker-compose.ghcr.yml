@@ -21,6 +21,6 @@ services:
   jan:
     image: ghcr.io/prettyopenlobby/hippaulholo:${HIPPAULHOLO_TAG:-${CRYSTALHOLO_TAG:-latest}}
     pull_policy: missing
-  board:
+  janboard:
     image: ghcr.io/prettyopenlobby/hippaulholo:${HIPPAULHOLO_TAG:-${CRYSTALHOLO_TAG:-latest}}
     pull_policy: missing

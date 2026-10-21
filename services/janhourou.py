@@ -55,6 +55,7 @@ from janworld import (  # noqa: E402
     dispatch as _dispatch,
     social as _social,
     galley as _galley,
+    gmnotice as _gmnotice,
     server as _server,
     selftest as _selftest,
 )
@@ -241,6 +242,21 @@ _OWNERS = {
     'to_peer_build': 'builds',
     'warn_expiring_seats': 'social',
     'web_watchable': 'galley',
+    'timeup_minutes': 'notices',
+    'call_notice': 'notices',
+    'gm_notice_open': 'notices',
+    'gm_notice_close': 'notices',
+    'gm_kick': 'notices',
+    'MjNOTICECALL': 'notices',
+    'MjNOTICECALLACK': 'notices',
+    'CmNOTICEMSGOPEN': 'notices',
+    'CmNOTICEMSGCLOSE': 'notices',
+    'CmNOTICEJANHOLOWKICK': 'notices',
+    'notify_table_call': 'social',
+    'notice_call_on': 'social',
+    'gm_post': 'gmnotice',
+    'PLAYREQ_PASSWORD_OFF': 'opcodes',
+    'RESERVE_PASSWORD_ERROR': 'opcodes',
 }
 _MODULES = {
     'deps': _deps,
@@ -255,6 +271,7 @@ _MODULES = {
     'dispatch': _dispatch,
     'social': _social,
     'galley': _galley,
+    'gmnotice': _gmnotice,
     'server': _server,
     'selftest': _selftest,
 }

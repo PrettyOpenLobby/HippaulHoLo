@@ -328,6 +328,9 @@ class Presence:
         self._seq = None
         self._session_id = None
         self._resume_url = None
+        #: this connection reached READY or RESUMED. _run reads it to tell a
+        #: session that ran and then ended from a connect that never got going.
+        self._live = False
 
     # -- what the status says --------------------------------------------- #
     def set(self, text):
@@ -360,9 +363,17 @@ class Presence:
         """Connect, and keep reconnecting. Backoff is exponential with jitter
         and caps at 5 minutes: Discord being down must not turn into a busy
         loop, and every board reconnecting in lockstep would be our own
-        thundering herd."""
+        thundering herd.
+
+        The backoff only counts failures in a row. _session never returns
+        normally, so a session that reached READY or RESUMED and was then
+        ended (op 7 several times a day, or a dropped socket) resets it.
+        Without that the wait grew with every routine reconnect until it sat
+        at the cap, the resume then came too late for Discord to accept, and
+        each op 7 left the bot offline for 5 to 15 minutes."""
         delay = 1.0
         while not self._stop.is_set():
+            self._live = False
             try:
                 self._session()
                 delay = 1.0                     # a clean session resets backoff
@@ -376,6 +387,8 @@ class Presence:
                 log(self.name, "session failed (%s: %s)" % (type(e).__name__, e))
             if self._stop.is_set():
                 return
+            if self._live:
+                delay = 1.0
             wait = min(300.0, delay) * (0.5 + random.random())
             self._stop.wait(wait)
             delay = min(300.0, delay * 2)
@@ -472,6 +485,7 @@ class Presence:
             elif op == 0 and msg.get("t") == "READY":
                 d = msg.get("d") or {}
                 self._session_id = d.get("session_id")
+                self._live = True
                 url = d.get("resume_gateway_url")
                 # the resume URL comes without the query the first URL had,
                 # and a resume on v10 still needs it
@@ -480,6 +494,7 @@ class Presence:
                 user = (d.get("user") or {}).get("username") or "?"
                 log(self.name, "connected as %s" % user)
             elif op == 0 and msg.get("t") == "RESUMED":
+                self._live = True
                 log(self.name, "resumed")
             self._maybe_push(ws)
 

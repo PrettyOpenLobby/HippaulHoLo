@@ -41,6 +41,14 @@ RIICHI_AUTO = os.environ.get("POL_JAN_RIICHI_AUTO", "1") == "1"
 #:   "appear" -- subtype-0 MjALLDATA only, no motion-3: the discard just shows
 #:     up in the pond, no fly.
 DISCARD_ANIM = os.environ.get("POL_JAN_DISCARD_ANIM", "subtype3")
+#: A human's draw also goes to the OTHER humans, as a motion-2 MjTSUMO with no
+#: action menu. It is the only sign that the other human's turn has started,
+#: and it resets the waiting client's no-response counter: 2004 fn_002a6210
+#: shows "No response from the server" after 60 s with no in-game record and
+#: leaves the game at 180 s (live 2026-10-09). The client fills a hand from
+#: MjTSUMO only for its own seat (+0x28 == my seat), so the tiles stay hidden.
+#: "0" = the draw goes to the drawer only.
+VIEWER_DRAW = os.environ.get("POL_JAN_VIEWER_DRAW", "1") == "1"
 
 #: Hold the deal this many seconds after MjREADY before sending MjHAIPAI.
 #: WARNING:KEY: THE BOARD-ZOOM FIX (2026-09-03, proven by Deck-vs-desktop savestate
@@ -87,16 +95,24 @@ CONCEAL_RESYNC = os.environ.get("POL_JAN_CONCEAL_RESYNC", "0") == "1"
 #: Same switch governs the DEAL: with concealment off, msg_haipai sends
 #: opponents face-up too, so the deal matches play.
 CONCEAL_DEAL = CONCEAL_RESYNC
-#: `POL_JAN_KAN_MOTION=1` drives a granted kan as the client's own motions
-#: (6 daiminkan / 7 ankan / 8 kakan on ONE MjALLDATA whose +0x1c carries the
-#: rinshan tile -- the handler plays the kan, flips the kan-dora and flies the
-#: rinshan draw itself -- then MjTSUMO motion 0). WARNING: DEFAULT OFF: the path is
-#: built from the C (janmsgs' CALL MOTIONS + WAMPAI banners) and
-#: selftest-proven, but has NEVER been screen-proved, and the last unproved
-#: animation path that went live (the 0x3F back id) froze the host. Off = the
-#: resync path that is live today: MjALLDATA subtype 0 + MjTSUMO motion 2.
-#: `msg_kan()` serves both.
-KAN_MOTION = os.environ.get("POL_JAN_KAN_MOTION", "0") == "1"
+#: `POL_JAN_KAN_MOTION` (default ON since 2026-10-08) drives a granted kan as
+#: the client's own motions (6 daiminkan / 7 ankan / 8 kakan on ONE MjALLDATA
+#: whose +0x1c carries the rinshan tile -- the handler plays the kan, flips the
+#: kan-dora and flies the rinshan draw itself -- then MjTSUMO motion 0): the
+#: banner, the sound, the meld build and the new indicator, which the resync
+#: path never shows. Checked against the 2004 build (the one played) on
+#: 2026-10-08: its kan arms in the MjALLDATA handler (0x00287fe0, the motion 6/7
+#: branches at jan_00280000.c ~4880-4970) hide the newest REVEALED indicator
+#: (fn_002c35d0, slots 12..6) and its rinshan motion (enter_rinsyan_002c3c40)
+#: flips the first hidden one from slot 6 up (fn_002c2790, gated on the DORA
+#: enum at HAIPAI +0x2d, which the 2004 conversion keeps in place) -- the same
+#: hide-then-flip contract as the 2002 chain this record was built for, so the
+#: record's "new indicator already revealed, rinshan still in its slot" form
+#: is what both builds expect. Every tile id it carries is a real tile (the
+#: 0x3F back id that froze the host is never sent). NOT YET SEEN ON A SCREEN:
+#: `POL_JAN_KAN_MOTION=0` puts back the resync path (MjALLDATA subtype 0 +
+#: MjTSUMO motion 2) with no deploy. `msg_kan()` serves both.
+KAN_MOTION = os.environ.get("POL_JAN_KAN_MOTION", "1") == "1"
 #: `POL_JAN_WANPAI_LEGACY=1` sends the dead wall in the pre-2026-09-04 wire
 #: form (indicator at slot 12, the revealed bit inverted -- janmsgs' WAMPAI
 #: banner has the re-measurement). A rollback lever only: the new form is the

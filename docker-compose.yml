@@ -4,10 +4,16 @@
 #
 # With both repositories checked out side by side, from this directory:
 #
+#   python ../openlobby/tools/stack.py enable jan
+#   python ../openlobby/tools/stack.py compose up -d --build
+#
+# which runs, for Janhourou alone (README.md, "By hand"):
+#
 #   docker compose --project-directory ../openlobby \
+#       --env-file ../openlobby/.env --env-file .env \
 #       -f ../openlobby/docker-compose.yml -f docker-compose.yml up -d --build
 #
-# (put that in a shell alias or use COMPOSE_FILE; see README.md). It replaces
+# It replaces
 # the core's login and authsess images with this one (the core plus the
 # title), adds the parlour listener the client dials on 51272 and, optionally,
 # the live board. Everything else - ports, volumes, the other services - is
@@ -20,9 +26,9 @@
 # entries; the two services added here name them and wait for them the same
 # way. Each applies Janhourou's migrations (services/jan_migrations/) at start.
 #
-# Running Tetra Master as well: build this image on top of HippaulMaster's
-# (OPENLOBBY_IMAGE=hippaulmaster:latest, POL_TITLES=tmtitle,jantitle) and
-# stack the three compose files; see README.md, "With Tetra Master".
+# Running Tetra Master as well: `stack.py enable tm,jan` builds this image on
+# top of HippaulMaster's and sets POL_TITLES=tmtitle,jantitle. README.md,
+# "With Tetra Master", has the same by hand.
 
 services:
   # login builds the title image; authsess and jan consume it. Exactly one
@@ -31,17 +37,26 @@ services:
     image: hippaulholo:latest
     build:
       context: ../hippaulholo
+      dockerfile: Dockerfile
       args:
-        OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
+        # the image this one is layered on: POL_TITLE_BASE_IMAGE when titles
+        # are stacked (tools/stack.py in OpenLobby sets it), else the core
+        OPENLOBBY_IMAGE: "${POL_TITLE_BASE_IMAGE:-${OPENLOBBY_IMAGE:-openlobby:latest}}"
     pull_policy: build
     environment:
       POL_TITLES: "${POL_TITLES:-jantitle}"
+      # which save and record layouts a client gets: auto (empty), 1 = the
+      # 2004 build for everyone, 0 = the 2002 one (README.md, "Both client builds")
+      POL_JAN_SAVE_2004: "${POL_JAN_SAVE_2004:-}"
 
   authsess:
     image: hippaulholo:latest
     pull_policy: never
     environment:
       POL_TITLES: "${POL_TITLES:-jantitle}"
+      # which save and record layouts a client gets: auto (empty), 1 = the
+      # 2004 build for everyone, 0 = the 2002 one (README.md, "Both client builds")
+      POL_JAN_SAVE_2004: "${POL_JAN_SAVE_2004:-}"
 
   # THE PARLOUR LISTENER (content id 3's own host, gi003.pol.com:51272): the
   # zone and table session the client opens beside its auth session. The
@@ -80,7 +95,7 @@ services:
   # rendered screen and the 3D watch view need art baked from your own
   # client (README.md, "The live board").
   #   docker compose ... --profile board up -d
-  board:
+  janboard:
     image: hippaulholo:latest
     pull_policy: never
     restart: unless-stopped

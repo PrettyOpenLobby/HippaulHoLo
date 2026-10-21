@@ -28,8 +28,7 @@ adds the listener, and an optional live board.
 - This repository checked out as `hippaulholo`, which is where the compose files
   look for it (`git clone https://github.com/PrettyOpenLobby/HippaulHoLo.git hippaulholo`).
   A checkout from before the rename, still named `crystalholo`, needs renaming.
-- The OpenLobby core, checked out beside this repository and already built
-  once (`docker compose up -d --build` in that checkout)
+- The OpenLobby core, checked out beside this repository as `openlobby`
 - A PlayStation 2 with PlayOnline and Janhourou installed on its hard disk,
   or an emulator running such an install; see "PlayStation 2 clients" in
   the OpenLobby README for what that involves. There is no PC client.
@@ -37,22 +36,42 @@ adds the listener, and an optional live board.
 
 ## Bring-up
 
+From this directory:
+
 ```
-cp .env.example .env
+python ../openlobby/tools/stack.py enable jan
+python ../openlobby/tools/stack.py compose up -d --build
+```
+
+That builds the core image, rebuilds the core's `login` and `authsess`
+containers from the `hippaulholo` image (the core image plus this title),
+starts the `jan` listener on 51272, and leaves everything else the core's.
+The game reads nothing from your client, so there is no data step.
+`stack.py` is OpenLobby's launcher for the core and its games (OpenLobby's
+docs/games.md): it remembers which games you enabled, runs them in the
+core's compose project, and when several games plug into `login` it builds
+their images one on another and lists them all in `POL_TITLES`.
+
+Settings go in this directory's `.env` (copy `.env.example`); stack.py
+passes it to compose after OpenLobby's own `.env`. To take the title out
+again, `python ../openlobby/tools/stack.py disable jan`, then
+`python ../openlobby/tools/stack.py compose up -d --build --remove-orphans`.
+
+### By hand
+
+The command stack.py runs for Janhourou alone, from this directory:
+
+```
 docker compose --project-directory ../openlobby \
+    --env-file ../openlobby/.env --env-file .env \
     -f ../openlobby/docker-compose.yml -f docker-compose.yml up -d --build
 ```
 
-That rebuilds the core's `login` and `authsess` containers from the
-`hippaulholo` image (the core image plus this title), starts the `jan`
-listener on 51272, and leaves everything else the core's. The image is
-layered on whatever `openlobby:latest` is on your machine: after pulling a
-newer OpenLobby, rebuild it there first (`docker compose build` in its
-checkout), or this title runs on the old core underneath. The long command
-is the price of running inside the core's project; put it in a shell alias,
-or set `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME` in your environment. To take
-the title out again, run the core's own `docker compose up -d` from its
-checkout.
+Compose refuses an `--env-file` that does not exist, so leave out the one
+you have not created. The image is layered on whatever `openlobby:latest`
+is on your machine: build the core first, and after pulling a newer
+OpenLobby rebuild it there (`docker compose build` in its checkout), or this
+title runs on the old core underneath.
 
 ### Moving from an earlier release
 
@@ -83,27 +102,35 @@ has nothing to import: an install that never ran an event has no
 
 ### With Tetra Master
 
-Both titles run in the same processes. With HippaulMaster brought up once
-(so its image exists), build this image on top of it and name both plugins:
+Both titles run in the same processes. With HippaulMaster checked out beside
+this repository, `python ../openlobby/tools/stack.py enable tm,jan` and the
+same `compose up -d --build` build this image on top of HippaulMaster's and
+name both plugins. By hand, build HippaulMaster's image first (its README),
+then:
 
 ```
-OPENLOBBY_IMAGE=hippaulmaster:latest POL_TITLES=tmtitle,jantitle \
+POL_TITLE_BASE_IMAGE=hippaulmaster:latest POL_TITLES=tmtitle,jantitle \
 docker compose --project-directory ../openlobby \
     -f ../openlobby/docker-compose.yml -f ../hippaulmaster/docker-compose.yml \
     -f docker-compose.yml up -d --build
 ```
 
-(or set the two variables in `.env`). Each title serves its own players:
-the lobby lists a console asks for are the title's it is in.
+Each title serves its own players: the lobby lists a console asks for are
+the title's it is in.
 
 ### Without building
 
 The image is published to `ghcr.io/prettyopenlobby/hippaulholo` on every push,
-layered on the published OpenLobby image. Apply the pull-only overrides of
-both repositories after their compose files, from this directory:
+layered on the published OpenLobby image.
+`python ../openlobby/tools/stack.py compose --ghcr up -d` uses it. By hand,
+apply the pull-only overrides of both repositories after their compose
+files, from this directory:
 
 ```
-docker compose --project-directory ../openlobby     -f ../openlobby/docker-compose.yml -f ../openlobby/docker-compose.ghcr.yml     -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+docker compose --project-directory ../openlobby \
+    --env-file ../openlobby/.env --env-file .env \
+    -f ../openlobby/docker-compose.yml -f ../openlobby/docker-compose.ghcr.yml \
+    -f docker-compose.yml -f docker-compose.ghcr.yml up -d
 ```
 
 `HIPPAULHOLO_TAG` and `OPENLOBBY_TAG` pick the versions (default `latest`). A second image, tagged `with-hippaulmaster`, is built on
@@ -182,8 +209,8 @@ shared event calendar (`eventcal`, when the core provides it);
 
 ## The live board (optional)
 
-`docker compose ... --profile board up -d` adds a read-only web page of the
-standings on port 8791 (bound to localhost; put a reverse proxy in front),
+`python ../openlobby/tools/stack.py compose --profile board up -d` adds the
+`janboard` service, a read-only web page of the standings on port 8791 (bound to localhost; put a reverse proxy in front),
 with Discord posting configured by the `POL_BOARDS_JAN_*` variables in
 `.env.example`. Out of the box it is a text page: the rendered screen
 (`/render.png`, the Discord image) and the 3D watch page draw with art

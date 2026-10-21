@@ -207,6 +207,77 @@ def main():
     check("...and declining left the record queued",
           len(jantitle._jan_pending_lines(6, on_sid="SID1")) == 1)
 
+    # THE CONNECTION PIN (live 2026-10-13). A connection that RESUMED the
+    # member's session shares its sid with the live one, so the sid pin let a
+    # relay-held zombie drain the game-start pair and the player never left
+    # the lobby. The idle push drains only on the connection thread that
+    # carried the member's last game-band line.
+    import threading
+    _saved_sid = jantitle._session_sid
+    jantitle._session_sid = lambda: "SID1"
+    try:
+        _here = threading.get_ident()
+        jantitle._JAN_GAME_PEER[6] = (b"TGT", b"NICK", b"srv", "SID1", None,
+                                      _here + 1)
+        _gt.queue_for(1, janwire.pack(opcode=14, length=0x18)[:0x18])
+        check("an idle push on ANOTHER connection with the same sid sends nothing",
+              jantitle._idle_pushes(6, set()) == [])
+        jantitle._JAN_GAME_PEER[6] = (b"TGT", b"NICK", b"srv", "SID1", None,
+                                      _here)
+        check("...and the game-band connection then gets the record it left",
+              len(jantitle._idle_pushes(6, set())) == 1)
+        jantitle._JAN_GAME_PEER[6] = (b"TGT", b"NICK", b"srv", "SID1")
+        _gt.queue_for(1, janwire.pack(opcode=14, length=0x18)[:0x18])
+        check("an old 4-tuple pin still drains on its sid",
+              len(jantitle._idle_pushes(6, set())) == 1)
+    finally:
+        jantitle._session_sid = _saved_sid
+
+    # THE ROOM'S MEMBER LIST RIDES THE SAME CHANNEL (2026-10-10). Live, a
+    # player back from a game never reached the list of someone already in
+    # the room: the sequence moved for tables alone. The registry, the
+    # poller's session and its room are stood in for; the reply is decoded
+    # the way lb__002f9ab8 reads PD and checked against the SNAPSHOT row.
+    _room = janlobby.all_rooms()[0]
+    _who = [{"name": "Lex", "member_id": 3}]
+    _saved = (jantitle._session_get, jantitle._jan_member_room,
+              jantitle._live_rooms)
+    jantitle._session_get = lambda k, d=None: 3 if k == "member_id" else d
+    jantitle._jan_member_room = lambda m: _room
+    jantitle._live_rooms = lambda: {_room.channel: {"who": list(_who)}}
+    try:
+        janseats._ROSTER.clear()
+        s0 = janseats.sequence(_room.id)
+        check("roster: the first poll in a room records it and says nothing",
+              ask(s0) == (None, True) and janseats.sequence(_room.id) == s0)
+        _who.append({"name": "Ardenvale", "member_id": 17})
+        reply, _h = ask(s0)
+        g = polpro.parse(reply) if reply else []
+        check("roster: an arrival is DD, DN, then a (DC, PD) pair",
+              [t for t, _v in g] == ["DD", "DN", "DC", "PD"])
+        pd = g[3][1] if len(g) > 3 else [""] * 11
+        snap = janlobby.ptl_blob([janlobby.Occupant("Ardenvale", 17, 1)], None)
+        m0 = janlobby.PTL_MEMBER_OFF
+        check("THE PD ROW == THE SNAPSHOT ROW (id, name, level)",
+              int(pd[0], 16) == struct.unpack_from("<Q", snap, m0 + janlobby.PTL_M_ID)[0]
+              and pd[4].encode() == snap[m0 + janlobby.PTL_M_NAME:
+                                         m0 + janlobby.PTL_M_NAME + 9]
+              and int(pd[7]) == struct.unpack_from("<I", snap, m0 + janlobby.PTL_M_LEVEL)[0])
+        s1 = janseats.sequence(_room.id)
+        _who.pop(0)
+        reply, _h = ask(s1)
+        g = polpro.parse(reply) if reply else []
+        check("roster: a departure is a (DC, PC) pair naming Lex's row id",
+              [t for t, _v in g] == ["DD", "DN", "DC", "PC"]
+              and int(g[3][1][0], 16) == janlobby.PTL_MEMBER_ID_BASE | 3)
+        s2 = janseats.sequence(_room.id)
+        _who.append({"name": None, "member_id": 0})
+        check("roster: a restart GHOST moves nothing",
+              ask(s2) == (None, True))
+    finally:
+        (jantitle._session_get, jantitle._jan_member_room,
+         jantitle._live_rooms) = _saved
+
     os.environ["POL_JAN_DELTAS"] = "0"
     check("POL_JAN_DELTAS=0 declines, leaving the old behaviour untouched",
           ask(0) == (None, False))

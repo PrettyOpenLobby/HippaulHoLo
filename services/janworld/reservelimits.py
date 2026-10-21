@@ -35,7 +35,9 @@ RESERVE_LIMIT_RESULT = 10           # == janseats.RESERVE_LIMIT
 
 
 def _reserve_limits_on():
-    return os.environ.get("POL_JAN_RESERVE_LIMITS", "0") == "1"
+    """DEFAULT ON since 2026-10-08 (the limits are retail dialog rules);
+    POL_JAN_RESERVE_LIMITS=0 stops enforcing them."""
+    return os.environ.get("POL_JAN_RESERVE_LIMITS", "1") == "1"
 
 
 def reserve_limits_unmet(member_id, tid):

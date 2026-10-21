@@ -227,3 +227,37 @@ class Bot(object):
             if pairs >= self.TOITOI_PAIRS:
                 return True
         return False
+
+
+class TsumogiriProxy(Bot):
+    """DISCONNECT_MODE 1 (ツモ切り): the seat of a player who left is played
+    by discarding whatever it draws. It never wins, calls, declares riichi or
+    kans: the seat only keeps the hand moving. OURS where unmeasured (what
+    SE's proxy did on a winning draw); the rule's own name says it discards
+    the draw."""
+
+    #: `TableFlow._bot_turn` checks this before it lets a bot tsumo.
+    may_win = False
+
+    def __init__(self, seat):
+        Bot.__init__(self, seat, policy="tsumogiri")
+
+    def choose_discard(self, kyoku):
+        h = kyoku.hands[self.seat]
+        if h.drawn in h.tiles:
+            try:
+                forbidden = set(kyoku.kuikae_forbidden(self.seat))
+            except Exception:
+                forbidden = set()
+            if mj.kind(h.drawn) not in forbidden:
+                return h.drawn
+        return Bot.choose_discard(self, kyoku)
+
+    def wants_kan(self, kyoku):
+        return None
+
+    def wants_riichi(self, kyoku):
+        return False
+
+    def calls(self, kyoku, tile, options):
+        return None

@@ -11,6 +11,7 @@
     pushqueue.py       The lobby push queue: records for a member who is not the one talking, drained on their next line.
     dispatch.py        One inbound line to its answer: the game manager, the reserve and master commands, the rest captured.
     social.py          The table-social layer: the master's seat and commands, kicks, stored rules, table chat.
+    gmnotice.py        The operator's in-room notice window and kick (2004 notices 94/95/96), posted through Valkey.
     galley.py          Spectators (the gallery): who may watch a table, the watch request and leave, the web board's rule.
     server.py          The standalone TCP listener (POL_JAN_PORT, 51272): one thread per connection, one line at a time.
     selftest.py        The offline selftest (loopback, no client) and the command line.

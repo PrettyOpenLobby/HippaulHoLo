@@ -161,13 +161,41 @@ def _jan_roster_delta_reply(payload):
             except Exception as _e:
                 log("authserv", f"  jan roster: master/expiry notices raised "
                                 f"({_e!r}) -- continuing")
+        # THE ROOM'S MEMBER LIST (2026-10-10): who is in the room's channel
+        # now, against the list last seen -- arrivals and departures become
+        # PD/PC deltas in this room's sequence, so the list follows people
+        # without a re-fetch. Ghosts (restored after a restart, no member) are
+        # not people we can list.
+        if _dr_room is not None and hasattr(janseats, "sync_roster"):
+            try:
+                _occ = [_jan_decorate_occupant(o) for o in
+                        janlobby.occupants(_live_rooms(), _dr_room.channel)
+                        if getattr(o, "member_id", 0)]
+                janseats.sync_roster(_dr_rid, [
+                    (o.member_id, o.name, getattr(o, "level", 1),
+                     getattr(o, "profile_id", 0)) for o in _occ])
+            except Exception as _e:
+                log("authserv", f"  jan roster: member sync raised ({_e!r}) "
+                                f"-- the table deltas still go out")
         cur = janseats.sequence(_dr_rid)
         deltas = janseats.deltas_after(have, _dr_rid)
+        # ITS LIST IS ROOM 0'S. The lobby served this member the unknown-room
+        # fallback (a fetch before the JOIN with an unlearned key), and a `TD`
+        # row only lands on the row of the same name, so no delta from the
+        # real room can reach that list. Reload it once, now that the member
+        # is in a room the fetch will resolve.
+        _reload = (_dr_room is not None
+                   and janlobby.take_ptl_unplaced(_dr_member))
     except Exception as e:
         log("authserv", f"  jan roster: <DR> raised ({e!r}) -- silent")
         return None, False
     _where = (_dr_room.channel if _dr_room is not None
               else "room UNKNOWN (room 0)")
+    if _reload:
+        log("authserv", f"  jan roster: <DR>({have}) in {_where} from a client "
+                        f"that was served room 0's tables -- <DO>, i.e. reload "
+                        f"the snapshot for its real room")
+        return polpro.build([("DO", [str(cur)])]), True
     chunk = int(os.environ.get("POL_JAN_DELTA_CHUNK", "4") or 0)
     if deltas is not None and chunk and len(deltas) > chunk:
         log("authserv", f"  jan roster: <DR>({have}) in {_where} is owed "
@@ -183,7 +211,16 @@ def _jan_roster_delta_reply(payload):
         return None, True               # CURRENT -- silence, deliberately
     out = [("DD", ["0"]), ("DN", [str(len(deltas))])]
     rows = []
-    for seq, tid in deltas:
+    for d in deltas:
+        if len(d) > 2:
+            # A MEMBER delta (janseats.sync_roster): PD adds/updates the row,
+            # PC removes it -- cp__002fb290 commands 0x13 / 0x14.
+            seq, _z, tag, vals = d
+            out.append(("DC", [str(int(seq))]))
+            out.append((tag, [str(v) for v in vals]))
+            rows.append("%d:%s %s" % (seq, tag, vals[4] if tag == "PD" else vals[0]))
+            continue
+        seq, tid = d
         # `tid` is the ROOM's composite; the row it renders carries the base
         # id and the shared name, which is what the client matches on.
         values = janlobby.table_values_for(tid, _live_rooms())
@@ -283,7 +320,8 @@ def _jan_rank_blob(path):
         except Exception:
             continue
     try:
-        blob = janstats.rank_list_blob(cat, names=names, content_ids=cids)
+        blob = janstats.rank_list_blob(cat, names=names, content_ids=cids,
+                                       build_2004=_jan_peer_is_2004())
     except Exception as exc:
         log("lobby", f"  3:0 {path!r}: rank list build failed ({exc!r})")
         return None
@@ -390,11 +428,12 @@ def _jan_pool_reply(payload):
 _JAN_CONTENT_ID = 3
 
 
-#: member id -> (target, nick, srv, session id, ChatSession) from the last
-#: GAME-band line they sent. Process-local and deliberately so: it is a
-#: routing convenience, and a member we have not heard from on that band has
+#: member id -> (target, nick, srv, session id, ChatSession, thread id) from
+#: the last GAME-band line they sent. Process-local and deliberately so: it is
+#: a routing convenience, and a member we have not heard from on that band has
 #: nothing queued for them anyway. The ChatSession (5th, may be None) is what
-#: the sweeper pushes on; older 4-tuples are still read everywhere.
+#: the sweeper pushes on; the thread id (6th) is the connection the idle push
+#: is pinned to (`_idle_pushes`); older 4-tuples are still read everywhere.
 _JAN_GAME_PEER = {}
 #: member -> the address its game band last spoke from, for `_jan_pending_lines`
 #: when it runs on the sweeper thread rather than the member's own.
@@ -559,12 +598,15 @@ def notice(cls, payload, text, target, nick, srv, sess, tag=b"MJS"):
             # it as the peer would frame every later push "from" the channel.
             if payload[1:2] != b"A":
                 _JAN_GAME_PEER[_jan_mid] = (target, nick, srv, _session_sid(),
-                                            sess)
+                                            sess, threading.get_ident())
                 # ...and their ADDRESS, which is what says which build they
                 # run. The sweeper pushes from its own thread, where the
                 # per-thread marker is not set.
                 _JAN_PEER_IP[_jan_mid] = getattr(_peer_build, "ip", None)
-        reply = janhourou.handle_line(payload[1:], peer="auth-band",
+        # WHO IS TALKING: every auth-band line in the Jan trace names the
+        # member and the client kind, so a seat that goes silent can be put
+        # down to a PS2, a PC client or a 2002 install.
+        reply = janhourou.handle_line(payload[1:], peer=_jan_auth_peer(_jan_mid),
                                       member_id=_jan_mid)
     except Exception as e:
         log("authserv", f"  janhourou raised on {payload[:80]!r}: {e} -- silent")
@@ -724,7 +766,9 @@ def _jan_peer_is_2004():
     _member = (_session_get("member_id") if _session_get else None) or 0
     ip = getattr(_peer_build, "ip", None)
     if not ip:
-        return bool(_JAN_BUILD_BY_MEMBER.get(_member)) if _member else False
+        if _member and _member in _JAN_BUILD_BY_MEMBER:
+            return bool(_JAN_BUILD_BY_MEMBER[_member])
+        return _jan_session_is_pc()
     try:
         entry = (_client_builds(ip) if _client_builds else None) or {}
     except Exception:                                         # noqa: BLE001
@@ -734,7 +778,12 @@ def _jan_peer_is_2004():
     if not claims:
         # This address never claimed the title. If we learned the answer for
         # this member on a connection that DID carry one, keep it.
-        return bool(_JAN_BUILD_BY_MEMBER.get(_member)) if _member else False
+        if _member and _member in _JAN_BUILD_BY_MEMBER:
+            return bool(_JAN_BUILD_BY_MEMBER[_member])
+        # A PC Viewer with no claim yet (a new player's very first launch, the
+        # claim not filed for this address: a new player got "An error occurred
+        # getting the player details" once, then played on the next launch). The PC channel only ships the 2004 module now.
+        return _jan_session_is_pc()
     _seen, key, version = max(claims)
     # A US Viewer (region P2U) can only ever install the 2004 build, and once
     # it has taken an overlay from the P2U-0003 channel it claims THAT
@@ -749,6 +798,53 @@ def _jan_peer_is_2004():
     if _member:
         _JAN_BUILD_BY_MEMBER[_member] = got
     return got
+
+
+def _jan_session_is_pc():
+    """True when this thread's session logged in from a PC Viewer (its NICK
+    signature; accounts.CLIENT_SIGS). The PC Viewer runs JongHoLow, which is
+    the 2004 module since JAN_PC_2004_FROM. Never raises."""
+    try:
+        sig = _session_get("client_sig") if _session_get else None
+        if not sig or accounts is None:
+            return False
+        return accounts.client_label(str(sig), "") == "PC"
+    except Exception:                                         # noqa: BLE001
+        return False
+
+
+def _jan_client_kind(member=None):
+    """A short name for the client on THIS thread, for the trace: the
+    platform its Viewer claimed on its patch channel and the module build
+    (`PS2/P2U 20260921_J 2004`, `PC/W2U 20261007_1 2004`), or `?` when the
+    address never claimed the title. Same claims `_jan_peer_is_2004` reads."""
+    ip = getattr(_peer_build, "ip", None)
+    build = "2004" if _jan_peer_is_2004() else "2002"
+    if not ip or not _client_builds:
+        return "? %s" % build
+    try:
+        entry = _client_builds(ip) or {}
+    except Exception:                                         # noqa: BLE001
+        return "? %s" % build
+    claims = [(v.get("seen", ""), k, v.get("version", ""))
+              for k, v in entry.items() if k.endswith("/0003")]
+    if not claims:
+        return "? %s" % build
+    _seen, key, version = max(claims)
+    region = key.split("/", 1)[0]
+    plat = "PC" if region.startswith("W") else "PS2"
+    return "%s/%s %s %s" % (plat, region, version or "?", build)
+
+
+def _jan_auth_peer(member):
+    """The `peer` string the auth band hands janhourou: `auth-band[m3 PS2/P2U
+    20260921_J 2004]`. Plain `auth-band` without a member. Never raises."""
+    if not member:
+        return "auth-band"
+    try:
+        return "auth-band[m%s %s]" % (member, _jan_client_kind(member))
+    except Exception:                                         # noqa: BLE001
+        return "auth-band[m%s]" % member
 
 
 # WHICH BUILD IS BEING ANSWERED. janhourou turns game records into bytes, and
@@ -773,6 +869,15 @@ def _jan_save_for_build(path, data):
     except ValueError as e:
         log("lobby", f"  3:0 {path!r}: 2004 build, but NOT converted ({e})")
         return data
+    # The ten 2004-only statistics (+0x2B4..+0x2F0, jansave.STATS_2004): they
+    # have no 2002 home, so they go in after the move.
+    member = _session_get("member_id") if _session_get else None
+    if (member and janstats is not None
+            and os.environ.get("POL_JAN_SAVE_LIVE", "1") == "1"):
+        try:
+            out = jansave.apply_stats_2004(out, janstats.derive(janstats.load(member)))
+        except Exception as e:                                # noqa: BLE001
+            log("lobby", f"  3:0 {path!r}: 2004 statistics not written ({e!r})")
     log("lobby", f"  3:0 {path!r}: 2004 build (20040727_2) -- {want}B save moved "
                  f"to the {len(out)}B layout, magic {jansave.MAGIC_2004:#010x}")
     return out
@@ -957,11 +1062,11 @@ def _jan_lobby_blob(path, n, req_pt=None):
             # inside the room, key unlearned or not); else, last, the old
             # shared view -- everyone in any Jan room, and ROOM 0's four
             # tables under room 0's sequence. The tables/serial follow the
-            # same choice as the members, so a client that was placed wrong
-            # here (first-ever visit to a room: the key is unlearned and the
-            # fetch precedes the JOIN) reports room 0's serial on its next
-            # `<DR>`, which is answered against its REAL room and reloads
-            # it -- by then the JOIN has taught us the key.
+            # same choice as the members. A client placed wrong here (the key
+            # is unlearned and the fetch precedes the JOIN) holds room 0's rows,
+            # which its real room's `TD` deltas cannot reach (they match rows by
+            # name), so it is marked and its first `<DR>` from the real room is
+            # answered `<DO>`: the reload is served that room.
             room = janlobby.room_for_key(key)
             if room is not None:
                 what = "room %s (key %#x)" % (room.channel, key)
@@ -971,17 +1076,24 @@ def _jan_lobby_blob(path, n, req_pt=None):
                     what = ("room %s (key %#x unlearned; the asker is JOINed "
                             "there)" % (room.channel, key))
             if room is not None:
-                who = janlobby.occupants(live, room.channel)
+                who = [o for o in janlobby.occupants(live, room.channel)
+                       if getattr(o, "member_id", 0) or getattr(o, "name", None)]
             else:
                 # THE FETCH PRECEDES THE JOIN -- measured, see janlobby.py. With
                 # no room named we serve everyone in any Jan room rather than
                 # nobody, and say so, because an empty member list is exactly the
                 # symptom this whole change exists to remove.
                 who = [o for r in janlobby.all_rooms()
-                       for o in janlobby.occupants(live, r.channel)]
+                       for o in janlobby.occupants(live, r.channel)
+                       if getattr(o, "member_id", 0) or getattr(o, "name", None)]
                 what = ("room UNKNOWN (key %#x names none of ours, asker in "
                         "no Jan channel) -- serving every Jan room's occupants "
-                        "and room 0's tables" % key)
+                        "and room 0's tables; the first <DR> from the real "
+                        "room reloads it" % key)
+            # Mark (or clear) the member for the reload `_jan_delta_reply`
+            # sends once they poll from a real room: deltas cannot repair a
+            # list of room 0's rows (janlobby.note_ptl_unplaced).
+            janlobby.note_ptl_unplaced(member, room is None)
             me = _jan_self_occupant()
             if me is not None and not any(o.member_id == me.member_id
                                           for o in who):
@@ -1267,6 +1379,9 @@ def polpro_profile(cid, name, member_id):
             _jm, name=(janstats.load(_jm).get("name") or name or _jname),
             content_id=cid, show_flags=flags)
         jf.update(extra)
+        if _jan_peer_is_2004():
+            # v26 on the 2004 build's 19 x 7 ladder (janstats.RANK_VARIANTS_2004)
+            jf[26] = janstats.rank_index_2004(jf.get(26, 0))
         fields.update(jf)
         name = fields.get(2) or name
         member_id = _jm
@@ -1339,6 +1454,41 @@ def _session_quit(member_id, sid):
         log("authserv", f"  jan: QUIT seat release raised ({_e!r})")
 
 
+#: Set by `_begin_shutdown`: a stopping process closes every socket, and those
+#: closes must not release seats the clients will claim again from the next one.
+_SHUTTING_DOWN = [False]
+
+
+def _session_closed(member_id):
+    """A CRASHED PLAYER'S TABLE FREES WHEN THEIR CONNECTION CLOSES.
+
+    The core calls this once the member's last connection in a room is gone.
+    A client that crashes or loses its network sends no MjLEAVE*, so before
+    this the lobby seat lived on until POL_JAN_SEAT_TTL_S, and if the player
+    came back their own `<DR>` polls renewed it, so the table stayed occupied
+    for as long as they played anything else (seen 2026-10-07: table 1 held by
+    a seat whose game had already handed it to a CPU). The in-game seat went
+    to a CPU only after the sweeper's three missed turns.
+    """
+    if not member_id or _SHUTTING_DOWN[0]:
+        return
+    try:
+        if janseats.enabled():
+            _ct = janseats.release_member(member_id, why="connection closed")
+            if _ct:
+                log("authserv", f"  jan: member {member_id}'s connection closed "
+                                f"-- seat at table {_ct} released")
+                janhourou.notify_master_changes(peer="closed")
+    except Exception as _e:
+        log("authserv", f"  jan: closed-session seat release raised ({_e!r})")
+    games = getattr(janhourou, "GAMES", None)
+    if games is not None and hasattr(games, "member_gone"):
+        try:
+            games.member_gone(member_id, "connection closed")
+        except Exception as _e:
+            log("authserv", f"  jan: closed-session game drop raised ({_e!r})")
+
+
 def _idle_pushes(member_id, peers):
     """Records queued for a seat that is WAITING, for the core's idle tick.
 
@@ -1363,6 +1513,17 @@ def _idle_pushes(member_id, peers):
         return []
     got = _JAN_GAME_PEER.get(member_id)
     if not got or len(got) < 4 or got[3] != _session_sid():
+        return []
+    # WARNING: THE SESSION ID IS NOT PER-CONNECTION EITHER. A connection that
+    # RESUMES a session (the relay re-attaching after a drop) carries the same
+    # sid as the client's live one, and the relay keeps it answering PING for
+    # hours. Seen live: a player's game-start pair was pushed to a resumed relay
+    # connection on the same session id while their live client polled `<DR>`
+    # in the lobby, and
+    # the first three-player table stalled at Sashiuma waiting on a READY that
+    # could not come. Only the connection thread that carried the member's
+    # last game-band line may drain; any other one leaves the records queued.
+    if len(got) > 5 and got[5] is not None and got[5] != threading.get_ident():
         return []
     limit = int(os.environ.get("POL_JAN_PUSH_CHUNK", "2") or 0) or None
     # The records are shaped for the build they go to, which the per-thread
@@ -1424,6 +1585,7 @@ def _begin_shutdown():
     process a few seconds after SIGTERM while `live_games` is non-zero; the
     in-game handler answers each live table's next line (the client re-acks
     about every 2 s) with MjGAMEEND, so the player drops cleanly to the menu."""
+    _SHUTTING_DOWN[0] = True
     try:
         import jangame
         jangame.request_shutdown()
@@ -1508,6 +1670,9 @@ class Janhourou(titles.Title):
 
     def session_quit(self, member_id, sid):
         _session_quit(member_id, sid)
+
+    def session_closed(self, member_id):
+        _session_closed(member_id)
 
     def idle_pushes(self, member_id, peers):
         return _idle_pushes(member_id, peers)

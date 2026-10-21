@@ -237,7 +237,15 @@ def table_state_for(seated, capacity=4, in_play=False):
         if seated >= capacity:
             return 5                            # 対局中, in play
         return 2                                # 募集中, recruiting
-    if in_play or seated >= capacity:
+    # WARNING: A FULL TABLE IS NOT A STARTED ONE. This used to answer 5 for
+    # `seated >= capacity`, and a seated client whose own table row turns 5
+    # takes it as "your game has begun": live 2026-10-17 02:40Z the fourth
+    # reserve flipped room 101 table 1 to 5, all four clients sent MjENTERGAME
+    # within 3 s with nobody pressing Start Game, and their table menus offered
+    # Rejoin. Only a real start (janseats.set_in_play) is 5; a full table stays
+    # 4 so the master's Start Game is what begins it. The seat store already
+    # refuses a fifth reserve (RESERVE_FULL), so 4 does not let anyone else in.
+    if in_play:
         return 5                                # 対局中 -- watchable, not joinable
     if seated <= 0:
         # WARNING: AN EMPTY TABLE IS **OPEN**, NOT READY. Serving 4 here was this
@@ -538,10 +546,24 @@ def member_room_id(live, member_id):
 # time that room is entered, and an empty map degrades to exactly today's
 # behaviour (ANY_ROOM, every Jan room's occupants). It is kept in the Valkey hash
 # `jan:room-keys` (janstore.roomkey_key; it was the file
-# `<POL_DATA_DIR>/jan-room-keys.json`): live state, re-observed after a loss.
+# `<POL_DATA_DIR>/jan-room-keys.json`) AND in the table `jan_room_keys`.
+#
+# WARNING: VALKEY ALONE WAS NOT ENOUGH. Valkey runs with no persistence, and the
+# compose recreate of 2026-10-08 22:20Z emptied the hash. "Re-observed after a
+# loss" was true, but the first visit after the loss is served room 0's tables,
+# and that client's room-101 Start Game stayed grey (the `TD` delta for its
+# table names a row its list does not have). A key never changes its room, so
+# the table keeps every binding and refills Valkey when it comes back empty.
 _KEYMAP = {}                    # "key" -> channel
 _KEY_PENDING = {}               # member id -> (key, first seen)
 _KEYMAP_LOADED = [False]
+#: When the last load found nothing anywhere: an empty map is tried again after
+#: KEYMAP_RETRY_S instead of being believed for the life of the process.
+_KEYMAP_EMPTY_AT = [0.0]
+KEYMAP_RETRY_S = 60.0
+#: The selftest turns the table off so a run against a configured database
+#: cannot write its made-up bindings into the live one.
+_KEYMAP_DB = [True]
 KEY_BIND_WINDOW_S = 120.0
 
 
@@ -551,9 +573,40 @@ def _keymap_path():
     return janstore.roomkey_key()
 
 
-def _keymap_load():
-    if _KEYMAP_LOADED[0]:
+def _keymap_db_load():
+    """{key: channel} from `jan_room_keys`, or {} (no database, or it is away)."""
+    if not _KEYMAP_DB[0]:
+        return {}
+    try:
+        import janstore
+        janstore.ensure_schema()
+        return {str(r["room_key"]): str(r["channel"]) for r in
+                janstore.db.query("SELECT room_key, channel FROM jan_room_keys")}
+    except Exception:                       # noqa: BLE001 -- database away
+        return {}
+
+
+def _keymap_db_save(pairs):
+    """Write `pairs` ({key: channel}) to `jan_room_keys`. Never raises."""
+    if not _KEYMAP_DB[0] or not pairs:
         return
+    try:
+        import janstore
+        janstore.ensure_schema()
+        janstore.db.execute_many(
+            "INSERT INTO jan_room_keys (room_key, channel) VALUES (%s, %s)"
+            " ON CONFLICT (room_key) DO UPDATE SET channel = EXCLUDED.channel,"
+            " learned_at = now()",
+            [(str(k), str(c)) for k, c in pairs.items()])
+    except Exception:                       # noqa: BLE001 -- database away
+        pass
+
+
+def _keymap_load():
+    import time as _t
+    if _KEYMAP_LOADED[0]:
+        if _KEYMAP or _t.time() - _KEYMAP_EMPTY_AT[0] < KEYMAP_RETRY_S:
+            return
     _KEYMAP_LOADED[0] = True
     try:
         import janstore
@@ -561,15 +614,75 @@ def _keymap_load():
             _KEYMAP[str(k)] = str(v)
     except Exception:                       # noqa: BLE001 -- Valkey away: ANY_ROOM
         pass
+    # The durable copy fills in whatever Valkey lost, and Valkey gets it back
+    # so the next process to start finds it there.
+    lost = {k: c for k, c in _keymap_db_load().items() if k not in _KEYMAP}
+    if lost:
+        _KEYMAP.update(lost)
+        _keymap_save()
+    _KEYMAP_EMPTY_AT[0] = 0.0 if _KEYMAP else _t.time()
 
 
-def _keymap_save():
+def _keymap_save(bound=None):
+    """Write the map to Valkey, and `bound` ({key: channel}, the bindings just
+    learned) to the table as well."""
     try:
         import janstore
         if _KEYMAP:
             janstore.kv.hset(_keymap_path(), mapping=dict(_KEYMAP))
     except Exception:                       # noqa: BLE001 -- Valkey away
         pass
+    _keymap_db_save(bound)
+
+
+# THE CLIENT THAT WAS SERVED ROOM 0. A `b/g/PTL` with an unlearned key, asked
+# before the JOIN, gets room 0's tables. Its `<DR>` polls are then answered
+# against its real room, but a `TD` row is applied to the row of the SAME NAME,
+# and room 0's list has no `#MJS0T101001`, so the deltas change nothing and the
+# master's Start Game stays grey (seen 2026-10-09 00:20Z). login marks the member
+# here; authsess, which answers `<DR>` in another container, answers that
+# member's first poll from a real room with `<DO>`, and the reload is served the
+# right room. Kept in Valkey because it crosses the container split.
+PTL_UNPLACED_TTL_S = 600.0
+
+
+def _unplaced_path():
+    import janstore
+    return janstore.ptl_unplaced_key()
+
+
+def note_ptl_unplaced(member_id, unplaced):
+    """login, on every `b/g/PTL`: `unplaced` True when the fallback was served,
+    False when a real room was (which clears an earlier mark). Never raises."""
+    if not member_id:
+        return
+    try:
+        import janstore
+        import time as _t
+        if unplaced:
+            janstore.kv.hset(_unplaced_path(), str(int(member_id)),
+                             str(int(_t.time())))
+        else:
+            janstore.kv.hdel(_unplaced_path(), str(int(member_id)))
+    except Exception:                       # noqa: BLE001 -- Valkey away
+        pass
+
+
+def take_ptl_unplaced(member_id):
+    """authsess, on `<DR>` from a member placed in a real room: True (and the
+    mark cleared) when their list is room 0's and must be reloaded."""
+    if not member_id:
+        return False
+    try:
+        import janstore
+        import time as _t
+        at = janstore.kv.hget(_unplaced_path(), str(int(member_id)))
+        if at is None:
+            return False
+        janstore.kv.hdel(_unplaced_path(), str(int(member_id)))
+        return _t.time() - float(at) < PTL_UNPLACED_TTL_S
+    except Exception:                       # noqa: BLE001 -- Valkey away
+        return False
 
 
 def note_room_fetch(member_id, key):
@@ -612,7 +725,7 @@ def reconcile_room_keys(live):
         _KEYMAP[str(key)] = chans[0]
         bound.append((key, chans[0]))
     if bound:
-        _keymap_save()
+        _keymap_save(dict(bound))
     return bound
 
 
@@ -996,7 +1109,7 @@ def table_seating(tid, chan, live=None):
         seated_here = {m for m, _s, _n, _p in janseats.seats_at(tid)}
         bodies = [o for o in bodies if o.member_id in seated_here]
         seated = max(len(bodies), len(seated_here))
-        in_play = seated >= 4 or janseats.is_in_play(tid)
+        in_play = janseats.is_in_play(tid)      # a full table is not a started one
     else:
         seated = len(bodies)
         in_play = seated >= 4
@@ -1068,7 +1181,22 @@ def table_params_text_for(tid, index=None):
     ready, master = seat_marks(tid)
     return _table_params_text(number=index + 1, info_key1=base & 0xFFFF,
                               sort=index + 1, ready_mask=ready,
-                              master_seat=master)
+                              master_seat=master,
+                              filter_b=1 if table_has_password(tid) else 0)
+
+
+def table_has_password(tid):
+    """CSV field 9 (`filter_b`, HasPassword): non-zero makes the 2004 client
+    open TablePasswordInput before it reserves (the reserve path at
+    0x3abcc4 sscanf's blob+0x3CC and tests the 10th field) and then send what
+    was typed at MjPLAYREQ +0x44, which janworld.dispatch checks (result 9 =
+    ReservePassWordError, "入力したパスワードが違っています。"). Set exactly
+    when the master switched LIMIT_PASS_WORD on and stored a password."""
+    try:
+        import janrules
+        return bool(janrules.table_password(tid))
+    except Exception:                                   # noqa: BLE001
+        return False
 
 
 def table_values_for(tid, live=None):
@@ -1203,13 +1331,16 @@ MJS_TI_DIALOG_B = set(MJS_RULE_NAMES[19:])
 #   AKA_KIND 4 = the 5          DOUBLE_RON 1, HAKO 1, KUITAN 1 = Yes
 #   KYOKUSU 7  = Until South 4 (hanchan)     UMA 2 = 10-20
 #   IPPATSU 1, NOTEN 1 (3000 on table), PINZUMO 1 (with pinfu),
-#   REACH_AFTER_KAN 1 -- what the engine plays; no Rules field yet
+#   REACH_AFTER_KAN 1 -- each one a Rules field, mapped by Rules.from_config
 #   DISCONNECT_MODE 0 = Proxy (a dropped seat is played by a bot)
+#   GALLEY_LIMIT 1 = Yes: a table may be watched unless its master turns it off
+#   on the dialog (hosts rarely open the dialog, so with No as the default no
+#   table was ever watchable or posted to Discord)
 MJS_RULE_DEFAULT = {"GENTEN": 3, "RENCHAN": 3, "DORA": 3, "AKA_NUM1": 1,
                     "AKA_NUM2": 1, "AKA_NUM3": 1, "AKA_KIND": 4,
                     "DOUBLE_RON": 1, "HAKO": 1, "IPPATSU": 1, "KUITAN": 1,
                     "NOTEN": 1, "PINZUMO": 1, "KYOKUSU": 7, "UMA": 2,
-                    "REACH_AFTER_KAN": 1, "WAIT_TIME": 2}
+                    "REACH_AFTER_KAN": 1, "WAIT_TIME": 2, "GALLEY_LIMIT": 1}
 
 
 #: WARNING: `b/g/MJSTableInfoSub` IS THE TABLE MEMBER RECORD, not just the rules.
@@ -1607,7 +1738,7 @@ def selftest():
     check("PTL table 1 is free, so it is OPEN (0) -- the delta will make it 4 "
           "the moment somebody reserves it",
           p[PTL_TABLE_OFF + PTL_TABLE_REC + PTL_T_STATE] == 0)
-    check("a full table is 'in play'", table_state_for(4) == 5)
+    check("a full table nobody started is still ready (4)", table_state_for(4) == 4)
     check("an in-play mark wins over a joinable count",
           table_state_for(1, in_play=True) == 5)
     os.environ["POL_JAN_TABLE_STATES"] = "legacy"
@@ -1792,13 +1923,16 @@ def selftest():
     check("one seat makes it ready (4), so Start Game can ungrey",
           table_state_for(1) == 4)
     check("three seats is still ready", table_state_for(3) == 4)
-    check("a full table is in play (5)", table_state_for(4) == 5)
+    check("a full table is NOT in play until it is started (4)",
+          table_state_for(4) == 4)
+    check("...and a started full table is (5)", table_state_for(4, in_play=True) == 5)
     check("an explicit in-play mark is 5 whatever the count",
           table_state_for(1, in_play=True) == 5)
 
     # --- THE ROOM KEY IS LEARNED, NOT DECODED ------------------------------
     import tempfile as _tf
     os.environ["POL_JAN_ROOMKEY_KEY"] = "jan:test:%s:rk" % os.path.basename(_tf.mkdtemp())
+    _KEYMAP_DB[0] = False            # never the live jan_room_keys table
     _KEYMAP.clear(); _KEY_PENDING.clear(); _KEYMAP_LOADED[0] = False
     _LIVEKEY = 0x3d7c0054cc          # a real key off the wire, 2026-09-04
     _room1 = all_rooms()[0].channel
@@ -1825,8 +1959,49 @@ def selftest():
     check("the learned map survives a reload",
           (_KEYMAP_LOADED.__setitem__(0, False) or _KEYMAP.clear()
            or room_for_key(_LIVEKEY) is not None))
+    # A VALKEY LOSS (2026-10-08): the hash is gone, the table still has it.
+    _durable = {}
+    _saved_db = (globals()["_keymap_db_load"], globals()["_keymap_db_save"])
+    globals()["_keymap_db_load"] = lambda: dict(_durable)
+    globals()["_keymap_db_save"] = lambda pairs: _durable.update(
+        {str(k): c for k, c in (pairs or {}).items()})
+    try:
+        import janstore as _js
+        _js.kv.delete(_keymap_path())
+        _KEYMAP.clear(); _KEY_PENDING.clear(); _KEYMAP_LOADED[0] = False
+        note_room_fetch(8, _LIVEKEY)
+        reconcile_room_keys(_live_after_join)
+        check("a learned binding is written to the durable table",
+              _durable.get(str(_LIVEKEY)) == _room1)
+        _js.kv.delete(_keymap_path())
+        _KEYMAP.clear(); _KEYMAP_LOADED[0] = False
+        _r = room_for_key(_LIVEKEY)
+        check("after Valkey is emptied the table still names the room",
+              _r is not None and _r.channel == _room1)
+        check("...and Valkey is refilled from it",
+              (_js.kv.hgetall(_keymap_path()) or {}).get(str(_LIVEKEY)) == _room1)
+        _durable.clear(); _js.kv.delete(_keymap_path())
+        _KEYMAP.clear(); _KEYMAP_LOADED[0] = False
+        check("with both empty nothing is invented", room_for_key(_LIVEKEY) is None)
+        _durable[str(_LIVEKEY)] = _room1
+        check("an empty load is not believed for ever: a later source is read",
+              (_KEYMAP_EMPTY_AT.__setitem__(0, 1.0) or room_for_key(_LIVEKEY))
+              is not None)
+    finally:
+        globals()["_keymap_db_load"], globals()["_keymap_db_save"] = _saved_db
+    # THE CLIENT SERVED ROOM 0 is reloaded once, from its real room.
+    os.environ["POL_JAN_PTL_UNPLACED_KEY"] = os.environ["POL_JAN_ROOMKEY_KEY"] + ":up"
+    note_ptl_unplaced(8, True)
+    check("a member served the fallback list is marked for a reload",
+          take_ptl_unplaced(8) is True)
+    check("...once", take_ptl_unplaced(8) is False)
+    note_ptl_unplaced(8, True); note_ptl_unplaced(8, False)
+    check("a later fetch of a real room clears the mark", take_ptl_unplaced(8) is False)
+    os.environ.pop("POL_JAN_PTL_UNPLACED_KEY", None)
     os.environ.pop("POL_JAN_ROOMKEY_KEY", None)
     _KEYMAP.clear(); _KEY_PENDING.clear(); _KEYMAP_LOADED[0] = False
+    _KEYMAP_EMPTY_AT[0] = 0.0
+    _KEYMAP_DB[0] = True
 
     check("an unknown table id has no delta row",
           table_values_for(999, None) is None)

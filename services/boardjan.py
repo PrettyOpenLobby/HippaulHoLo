@@ -32,6 +32,7 @@ import struct
 import threading
 import time
 
+import janseats
 import janstats
 import janstore
 
@@ -348,7 +349,13 @@ PRESENCE_MANY = "players at the tables"
 
 def presence_count(args=None):
     """Distinct human players seated at a table that is still being played.
-    A COM seat has no `mid` (and is flagged `bot`), so it is not a person."""
+    A COM seat has no `mid` (and is flagged `bot`), so it is not a person.
+
+    The watched view alone only holds tables whose creator allowed watchers,
+    and Gallery defaults to No, so a game nobody may watch counted nobody
+    (10-09: two players mid-hanchan, the bot said 0). Every table in a game
+    is in the live document, watchable or not, and its seats are in
+    janseats' published document; those people count too."""
     seen = set()
     try:
         for tid, st in WATCH.served().items():
@@ -356,7 +363,12 @@ def presence_count(args=None):
                 continue
             for s in (st.get("seats") or []):
                 if isinstance(s, dict) and not s.get("bot") and s.get("mid") is not None:
-                    seen.add(s["mid"])
+                    seen.add(int(s["mid"]))
+        tables = janseats._live_tables() or {}
+        for tid in WATCH._read(time.time()):
+            for mem in janseats._fresh_seats(tables.get(str(tid)) or {}):
+                if str(mem).isdigit():
+                    seen.add(int(mem))
     except Exception:                                  # noqa: BLE001
         return None                                    # fall back to a marker
     return len(seen)

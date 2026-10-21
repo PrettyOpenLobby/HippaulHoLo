@@ -67,6 +67,7 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
         self._seq = 0
         self._last_sent = None
         self.sashiuma = None                       # pre-game side-bet handshake
+        self.readied = set()                       # live seats whose client sent MjREADY
         self.sashiuma_pairs = []                   # the (a, b) bets that are ON
         self._outgoing = []            # [(rec, seat or None)] for this call
         self.outbox = {}               # seat -> [rec] waiting for it to speak
@@ -92,6 +93,7 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
         # --- 2026-09-04 (audit 6/7/8/29/31/32) ---------------------------------
         self.timeouts = {}             # seat -> consecutive deadline strikes
         self._last_in = {}             # seat -> (op, seq, word) of the last line APPLIED
+        self._turn_seq = {}            # seat -> f13 of the MjTSUMO its MjSUTE must answer
         self._last_for = {}            # seat (or None) -> the last record sent to it
         self._awaiting_tag = None      # the `_awaiting` tuple `_awaiting_recs` describes
         self._awaiting_recs = []       # [(rec, to)] the current `_awaiting` waits on
@@ -100,6 +102,11 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
         self.finished_at = None        # when `_finish` ran (the reaper's grace)
         self._reap_held_said = False   # one HOLD line per table, not per sweep
         self.pending_chankan = None    # (seat, kind, pre_snapshot) in a chankan window
+        # --- the disconnect rules (janrules.disconnect_policy) ------------
+        self.disconnect = None         # (mode, adjust, penalty); None = defaults
+        self.departed = {}             # seat -> {member, reason, penalty, adjust, mode}
+        self._end_after_hand = False   # DISCONNECT_MODE "quit" fired this game
+        self._penalty_applied = False  # the penalty moved the final scores once
         self._hold_s = 0.0             # the deal delay, slept by Manager AFTER its lock
         self._managed = False          # True once a Manager owns this table
         self.last_line_at = self.clock()   # the idle TTL reads this
@@ -278,6 +285,25 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
             return self.drop_seat(seat, "timed out %d times" % strikes)
         return self.play_default_for(seat, op)
 
+    def _every_human_acked(self, seat):
+        """Record `seat`'s ack of the screen now awaited; True once every live
+        human has acked it.
+
+        WARNING: THE FIRST ACK USED TO MOVE EVERYONE ON (2026-10-09, live). With
+        two humans the faster one's ack sent BOTH the next screen while the
+        other was still reading this one; on the results screen that left a
+        greyed Next until the client's own 60 s countdown. The set is keyed
+        on the `_awaiting` tuple's identity (every builder assigns a fresh
+        one), so it starts over with each screen. A seat-less ack keeps the
+        old meaning (advance); a silent seat is the sweeper's to time out."""
+        if seat is None:
+            return True
+        if getattr(self, "_acks_for", None) is not self._awaiting:
+            self._acks_for = self._awaiting
+            self._acks = set()
+        self._acks.add(seat)
+        return all(s in self._acks for s in self.live if s not in self.bots)
+
     def _ack_advance(self, op):
         """The ladder step an ack of broadcast `op` buys. ONE writer for the
         ack arms in `handle()` AND for the sweeper's proceed-as-acked, so the
@@ -382,13 +408,34 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
         if seat in self.dropped:
             return []
         was_awaiting = self._awaiting
+        mode, adjust, penalty = self._disconnect_rule()
+        mid_game = (self.state == "playing" and self.game is not None
+                    and not getattr(self.game, "finished", False))
         self.dropped.add(seat)
         self.live.discard(seat)
         self.timeouts.pop(seat, None)
-        self.bots[seat] = bots.Bot(seat)         # the hand plays on, seat automated
+        # THE TABLE'S DISCONNECT RULE (途中退場処理, config 22): "proxy" -- a
+        # CPU plays the seat; "tsumogiri" -- the seat only discards what it
+        # draws; "quit" -- a CPU finishes the hand it left in and the game
+        # ends there (`_end_after_hand`, read by next_kyoku_or_end).
+        self.bots[seat] = (bots.TsumogiriProxy(seat) if mode == "tsumogiri"
+                           else bots.Bot(seat))
+        if mid_game:
+            member = self.member_of_seat(seat)
+            self.departed[seat] = {"member": member, "reason": reason,
+                                   "penalty": int(penalty or 0), "adjust": bool(adjust),
+                                   "mode": mode}
+            if mode == "quit":
+                self._end_after_hand = True
+            self._record_disconnect(seat, member, mode, penalty)
         self.log.append(("drop", (seat, reason)))
-        self.trace("LEAVE %s (%s) -- a CPU plays the seat from here"
-                   % (self._seatname(seat), reason))
+        self.trace("LEAVE %s (%s) -- %s%s"
+                   % (self._seatname(seat), reason,
+                      {"tsumogiri": "the seat discards its draws from here",
+                       "quit": "a CPU finishes this hand and the game ends"}.get(
+                          mode, "a CPU plays the seat from here"),
+                      ("  [penalty %d, settled %s]" % (penalty, "yes" if adjust else "no"))
+                      if mid_game and (penalty or adjust) else ""))
         if not self.live:
             # The last person is gone: there is nobody to announce it to and
             # nothing to play for. The Manager reaps a finished table.
@@ -446,6 +493,34 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
             return out + self._sashiuma_seat_gone(seat)
         return out
 
+    def _disconnect_rule(self):
+        """(mode, adjust, penalty points) -- the master's choice in the table
+        dialog (janrules.disconnect_policy), set on the table by the Manager;
+        a table built without one plays the dialog's defaults (proxy, no
+        settlement, no penalty)."""
+        rule = getattr(self, "disconnect", None)
+        if not rule:
+            return ("proxy", False, 0)
+        try:
+            mode, adjust, penalty = rule
+            return (str(mode), bool(adjust), int(penalty or 0))
+        except (TypeError, ValueError):
+            return ("proxy", False, 0)
+
+    def _record_disconnect(self, seat, member, mode, penalty):
+        """The leaver's record carries the exit (janstats.record_disconnect),
+        whatever happens to the game after it -- the last human leaving ends
+        the table before any results screen exists."""
+        if not member or tableresults.janstats is None or not knobs.STATS_ENABLE:
+            return
+        try:
+            tableresults.janstats.record_disconnect(member, penalty=penalty, mode=mode,
+                                                    table_id=self.id)
+            self.log.append(("disconnect-recorded", (member, seat, penalty)))
+        except Exception as e:
+            self.log.append(("stats-error", "disconnect seat %d: %s: %s"
+                             % (seat, type(e).__name__, e)))
+
     def rejoin(self, seat):
         """A member re-entered a playing table (finding 29): put the human back
         on its stored seat -- the bot that was substituted for it, if any,
@@ -456,6 +531,12 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
         was_bot = seat in self.bots
         self.bots.pop(seat, None)
         self.dropped.discard(seat)
+        # Back at the table: the exit no longer stands against the score, and
+        # a "quit" it triggered no longer ends the game (the stats keep the
+        # disconnect itself -- it happened).
+        self.departed.pop(seat, None)
+        self._end_after_hand = any(d.get("mode") == "quit"
+                                   for d in self.departed.values())
         self.timeouts.pop(seat, None)
         self._byes.discard(seat)
         self.live.add(seat)
@@ -497,10 +578,14 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
                                        (k.kyoku & 3) + 1, k.honba)
         narration._trace(rnd + msg)
 
-    def _emit(self, rec, why="", to=None, gallery=None):
+    def _emit(self, rec, why="", to=None, gallery=None, track=True):
         """Record one outgoing message. `to` is the seat it is FOR, or None for
         every live seat. `gallery` is the copy the SPECTATORS get instead of
-        `rec` (a builder passes one when `rec` conceals a hand); None = `rec`.
+        `rec` (a builder passes one when `rec` conceals a hand); None = `rec`,
+        False = no spectator copy at all (a per-viewer duplicate).
+        `track=False` is a display-only record (a viewer's copy of another
+        human's draw): it is never what `_renudge` re-sends, so it does not
+        become `_last_for` or join the awaited records.
 
         WARNING: ROUTING IS ADDITIVE ON PURPOSE. Callers still get `rec` back and
         still build their own lists exactly as before, so with one live seat
@@ -514,6 +599,10 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
         h = janwire.unpack(rec)
         self.log.append((h["opcode"], why))
         self._outgoing.append((rec, to))
+        if not track:
+            if gallery is not False:
+                self._gallery_copy(rec, h, gallery)
+            return rec
         # Per-seat "the last record you were sent" and "the record(s) the
         # current `_awaiting` is waiting on" -- what `_renudge` re-sends. A
         # builder assigns a NEW tuple to `_awaiting` before it emits, so
@@ -532,7 +621,8 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
         # The spectators' copy -- of EVERY record, `to=seat` ones included
         # (GALLERY banner). Re-sends (`_renudge*`) bypass `_emit` on purpose:
         # a same-seq record would only make the spectator re-send its ack.
-        self._gallery_copy(rec, h, gallery)
+        if gallery is not False:
+            self._gallery_copy(rec, h, gallery)
         return rec
 
     def _awaited_recs(self):
@@ -619,6 +709,31 @@ class Table(tablegallery.TableGallery, tablestate.TableState, tablemsgs.TableMes
 
     def begin_routing(self):
         self._outgoing = []
+        self._riders = {}
+
+    def add_rider(self, parent, rec):
+        """`rec` travels right behind `parent` wherever `parent` is delivered,
+        without the builder's caller having to return it (a viewer's copy of a
+        human's draw, built inside `msg_tsumo`). Keyed by id() but holding
+        `parent` itself, and matched by identity, so a recycled id can never
+        attach a rider to the wrong record."""
+        riders = getattr(self, "_riders", None)
+        if riders is None:
+            riders = self._riders = {}
+        riders.setdefault(id(parent), (parent, []))[1].append(rec)
+
+    def expand_riders(self, records):
+        """`records` with each one's riders inserted right after it."""
+        riders = getattr(self, "_riders", None) or {}
+        if not riders:
+            return records
+        out = []
+        for r in records:
+            out.append(r)
+            ent = riders.get(id(r))
+            if ent is not None and ent[0] is r:
+                out.extend(ent[1])
+        return out
 
     def take_routes(self):
         out = self._outgoing

@@ -106,6 +106,10 @@ def selftest(trace=False):
     ok &= check(_t2b is _t2 and _t2.seats[0] == 0xFEED,
                 "a second Start Game on a PLAYING table changes nothing")
     _t2.state = "idle"
+    # A FIXED deal: the discard/draw checks below need seat 0's first discard
+    # to give seat 1 a plain draw, not a call offer (an unseeded deal made
+    # them flaky).
+    _t2.rng = random.Random(20261009)
 
     # The deal: one record per live seat, each hiding the other's tiles.
     _t2.game = _t2.game or None
@@ -151,6 +155,40 @@ def selftest(trace=False):
     _leak = [r for r in _theirs if r in _priv]
     ok &= check(not _leak,
                 "seat 0's own draw did not leak into seat 1's outbox")
+
+    # A HUMAN'S DISCARD IS SHOWN TO THE OTHER HUMAN (2026-10-09, live): seat 1
+    # used to get nothing for seat 0's discard and only saw it after its own.
+    # Seat 1 gets a motion-3 MjTSUMO naming seat 0; seat 0 never does (its
+    # client animates its own discard, and a second one double-appends).
+    if _priv:
+        _sute = _client_sute(_priv[-1], 0, 13)
+        _mine = _m.handle(_sute, member_id=15)
+        _theirs = _m.pending_for_member(6)
+
+        def _disc_of(recs, seat):
+            return [r for r in recs if janwire.unpack(r)["opcode"] == M.MjTSUMO
+                    and r[0x18] == 3 and r[0x22] == seat]
+        ok &= check(len(_disc_of(_theirs, 0)) == 1,
+                    "seat 1 is shown seat 0's discard (one motion-3 record)")
+        ok &= check(not _disc_of(_mine, 0),
+                    "seat 0 is NOT sent its own discard back")
+
+        # ...and seat 1's DRAW reaches seat 0 as a viewer copy (knobs.
+        # VIEWER_DRAW): motion 2 naming seat 1, no menu. The only sign the
+        # other human's turn began, and what keeps the 2004 client's
+        # "No response from the server" counter from running out.
+        def _draws_of(recs, seat):
+            return [r for r in recs if janwire.unpack(r)["opcode"] == M.MjTSUMO
+                    and r[0x18] == 2 and r[0x22] == seat]
+        ok &= check(_t2.pending_naki is None,
+                    "rig: seat 0's discard offered no call (seat 1 just draws)")
+        if knobs.VIEWER_DRAW:
+            _vd = _draws_of(_mine, 1)
+            ok &= check(len(_vd) == 1,
+                        "seat 0 is shown seat 1's draw (one motion-2 record)")
+            ok &= check(len(_draws_of(_theirs, 1)) == 1
+                        and not any(r in _vd for r in _theirs),
+                        "seat 1 gets its own draw and not the viewer copy")
 
     t = table.Table(1, seed=20260817)
     t.seat_player(0x1234, b"tester", seat=0)
@@ -1417,6 +1455,12 @@ def selftest(trace=False):
     ok &= check(not (tv._awaiting and tv._awaiting[1] == quitter),
                 "nothing is left waiting on the departed seat: %r"
                 % (tv._awaiting,))
+    # The leaver's client RE-SENDS its MjBYE: the retry must not finish the
+    # table under the human still playing (live 2026-10-09).
+    outr = tv.handle(janwire.pack(opcode=M.MjBYE, f13=0, src=quitter, dst=4,
+                                  f16=0, sub=3, length=0x18)[:0x18])
+    ok &= check(tv.state == "playing" and outr == [] and (1 - quitter) in tv.live,
+                "the leaver's RETRIED MjBYE changes nothing: %s" % tv.state)
     # The LAST human leaving ends the table exactly as before.
     other = 1 - quitter
     outl = tv.handle(janwire.pack(opcode=M.MjBYE, f13=0, src=other, dst=4,
@@ -1571,6 +1615,65 @@ def selftest(trace=False):
     ok &= check("MjHAIPAI" in _ops(outs),
                 "P1: ...and its SEISANACK to the next deal: %r" % _ops(outs))
 
+    # --- two humans on the results screen: deal only once BOTH have acked ----
+    # (2026-10-09, live: the first ack dealt, the faster human got "not
+    # ready" + deal + "ready" in one batch and sat on a greyed Next until its
+    # own 60 s countdown ran out.)
+    ms2 = manager.Manager()
+    ts2 = _two_humans(ms2, 103, 11)
+    ts2.start_game()
+    sc2 = _force_tsumo(ts2, 0)
+    ts2.kyoku.win_tsumo(0)
+    ts2.begin_routing()
+    ts2.on_win(0, sc2)
+    ts2.take_routes()
+    yd2 = ts2._awaited_recs()[0][0]
+    sz2 = ms2.handle(_client_ack(yd2, 1), member_id=6)
+    ok &= check("MjSEISAN" not in _ops(sz2)
+                and "MjSEISAN" not in _ops(ms2.pending_for_member(15)),
+                "win screen: the FIRST human's YAKUDISPACK moves nobody on: %r"
+                % _ops(sz2))
+    sz2 = sz2 + ms2.handle(_client_ack(yd2, 0), member_id=15)
+    ms2.pending_for_member(6)
+    ms2.pending_for_member(15)
+    seis2 = [r for r in sz2 if janwire.unpack(r)["opcode"] == M.MjSEISAN]
+    if seis2:
+        first = ms2.handle(_client_ack(seis2[0], 1), member_id=6)
+        ok &= check("MjHAIPAI" not in _ops(first)
+                    and "MjHAIPAI" not in _ops(ms2.pending_for_member(15)),
+                    "results: the FIRST human's SEISANACK deals nothing: %r"
+                    % _ops(first))
+        last = ms2.handle(_client_ack(seis2[0], 0), member_id=15)
+        theirs = ms2.pending_for_member(6)
+        ok &= check("MjHAIPAI" in _ops(last) and "MjHAIPAI" in _ops(theirs)
+                    and _ops(theirs).count("MjREADYSTATUS") == 1,
+                    "results: the LAST human's ack deals, and the other gets ONE "
+                    "gauge then the deal: %r / %r" % (_ops(last), _ops(theirs)))
+    else:
+        ok &= check(False, "results rig: no MjSEISAN after both YAKUDISPACKs: %r"
+                    % _ops(sz2))
+
+    # --- a closed connection hands the seat to a CPU at once -----------------
+    mg = manager.Manager()
+    pushed = []
+    mg.on_swept = pushed.extend
+    tg = _two_humans(mg, 120, 9)
+    tg.start_game()
+    ok &= check(mg.member_gone(6) is tg and 1 in tg.dropped and tg.live == {0}
+                and tg.state == "playing",
+                "member_gone: the closed seat is dropped, the game plays on: "
+                "live=%r state=%r" % (tg.live, tg.state))
+    ok &= check(pushed == [15] and "MjMEMBERLEAVE" in _ops(mg.pending_for_member(15)),
+                "member_gone: the survivor is pushed MjMEMBERLEAVE: %r" % pushed)
+    ok &= check(mg.member_gone(6) is tg and tg.live == {0},
+                "member_gone twice changes nothing")
+    mg.member_gone(15)
+    ok &= check(tg.state == "finished" and 120 not in mg.tables,
+                "member_gone for the last human finishes and forgets the table: %r"
+                % tg.state)
+    ok &= check(mg.member_gone(15) is None and mg.member_gone(0) is None,
+                "member_gone with no table is a no-op")
+
     # --- finding 7 (probe P2): a replayed MjSUTE is a retransmission ---------
     tp2 = table.Table(102, seed=7)
     tp2.seat_player(0x1111, "H", seat=0, member=15)
@@ -1590,6 +1693,21 @@ def selftest(trace=False):
     ok &= check(o2 and janwire.unpack(o2[-1])["f13"] == janwire.unpack(o1[-1])["f13"],
                 "P2: the reply is the record the seat is waiting on, SAME sequence "
                 "(the client dedups it): %r" % _ops(o2))
+    # --- 2026-10-09: a MjSUTE answering a SUPERSEDED draw is ignored ----------
+    # (live t2 16:10:25Z: a deadline played the seat's turn, then the client's
+    # answer to the old draw discarded a slot of the new one.)
+    ok &= check(janwire.unpack(o1[-1])["opcode"] == M.MjTSUMO
+                and tp2.kyoku.turn == 0, "stale rig: seat 0 to move again")
+    pond_s, turn_s = len(tp2.kyoku.hands[0].pond), tp2.kyoku.turn
+    o3 = tp2.handle(_client_sute(o[-1], 0, 5))  # answers the FIRST draw
+    ok &= check(o3 == [] and len(tp2.kyoku.hands[0].pond) == pond_s
+                and tp2.kyoku.turn == turn_s,
+                "stale: a MjSUTE naming the superseded draw discards NOTHING and "
+                "sends nothing: %r" % _ops(o3))
+    ok &= check(any(e[0] == "stale-sute" for e in tp2.log), "stale: ...and is logged")
+    tp2.handle(_client_sute(o1[-1], 0, 5))      # answers the CURRENT draw
+    ok &= check(len(tp2.kyoku.hands[0].pond) == pond_s + 1,
+                "stale: the answer to the current draw still discards")
     # A replayed ladder ack is silent (the deal-storm contract), a replayed
     # call-ack re-nudges, and neither mutates.
     tp2b = table.Table(103, seed=8)
@@ -1671,6 +1789,11 @@ def selftest(trace=False):
                 "P8: ...and the turn is re-offered: %r" % _ops(o8))
     # ...and the REAL ankan on the right slot: resync path = ALLDATA + TSUMO,
     # the meld formed, the rinshan drawn, the indicator revealed at once.
+    # The RESYNC path on purpose (POL_JAN_KAN_MOTION=0, the rollback lever):
+    # the motion path is the default and has its own checks below and in
+    # tools/jan_gaps_test.py.
+    _km_resync = knobs.KAN_MOTION
+    knobs.KAN_MOTION = False
     dora8 = k8.wall.dora_shown
     o8b = tp8.handle(_client_sute(o8[-1], 0, 0, action=M.SUTE_KAN))
     ok &= check(_ops(o8b) == ["MjALLDATA", "MjTSUMO"],
@@ -1680,6 +1803,7 @@ def selftest(trace=False):
                 "ankan: meld ANKAN, 11 tiles + rinshan draw, kan-dora revealed NOW "
                 "(%d -> %d)" % (dora8, k8.wall.dora_shown))
     ok &= check(o8b and o8b[-1][0x18] == 2, "the rinshan MjTSUMO is motion 2 on the resync path")
+    knobs.KAN_MOTION = _km_resync
 
     # --- finding 21: the kan family, both record paths ----------------------
     # A DAIMINKAN by the human through NAKIACK kan.
@@ -1762,6 +1886,8 @@ def selftest(trace=False):
     tc2.begin_routing()
     tsc2 = tc2.msg_tsumo(0)
     tc2.take_routes()
+    _km_resync = knobs.KAN_MOTION
+    knobs.KAN_MOTION = False            # the resync path, as above
     oc2 = mc2.handle(_client_sute(tsc2, 0, hc2.tiles.index(five_p), action=M.SUTE_KAN),
                      member_id=15)
     ok &= check(_ops(oc2) == ["MjALLDATA", "MjNAKI"] and tc2.pending_chankan is not None
@@ -1785,6 +1911,7 @@ def selftest(trace=False):
     ok &= check(_ops(o15) == ["MjTSUMO"] and o15[0][0x18] == 2,
                 "...the kan seat gets its rinshan MjTSUMO, motion 2 (resync path): %r"
                 % _ops(o15))
+    knobs.KAN_MOTION = _km_resync
     ok &= check(oc3 == [] or all(janwire.unpack(r)["opcode"] != M.MjTSUMO for r in oc3),
                 "...and seat 1 is NOT handed seat 0's private turn record: %r" % _ops(oc3))
     # The ron instead: the kan is robbed.
@@ -2442,9 +2569,17 @@ def selftest(trace=False):
     tu5.seat_player(0x5555, b"Stay", seat=0)
     tu5.seat_player(0x5656, b"Quit", seat=1)
     o5 = tu5.handle(_ready())
-    ok &= check([janwire.unpack(r)["opcode"] for r in o5]
-                == [M.MjSASHIUMASTART, M.MjSASHIUMASTART],
-                "both humans are offered the table: %r"
+    # ONLY the seat that said READY is offered: a client still entering the
+    # table drops what reaches it first (seen live: that player was never asked).
+    ok &= check([janwire.unpack(r)["opcode"] for r in o5] == [M.MjSASHIUMASTART]
+                and tu5.sashiuma["started"] == {0},
+                "seat 0's READY offers seat 0 only, not the human still loading: %r"
+                % [narration.M_NAME(janwire.unpack(r)["opcode"]) for r in o5])
+    o5 = tu5.handle(janwire.pack(opcode=M.MjREADY, f13=0, src=1, dst=4, f16=0,
+                                 sub=3, length=0x18)[:0x18])
+    ok &= check([janwire.unpack(r)["opcode"] for r in o5] == [M.MjSASHIUMASTART]
+                and tu5.sashiuma["started"] == {0, 1},
+                "seat 1 is offered the table in reply to its OWN READY: %r"
                 % [narration.M_NAME(janwire.unpack(r)["opcode"]) for r in o5])
     b5 = bytearray(6)
     b5[M.sashiuma_slot(0, 1)] = M.sashiuma_bit(0)      # seat 0 proposes to seat 1

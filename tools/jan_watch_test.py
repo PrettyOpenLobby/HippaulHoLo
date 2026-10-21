@@ -31,6 +31,11 @@ import janwire                    # noqa: E402
 import janmsgs as M               # noqa: E402
 import jangame                    # noqa: E402
 import boardjan                   # noqa: E402
+from jantable import tablesashiuma  # noqa: E402
+
+# READY must deal here: the side-bet handshake (on by default) would answer it
+# with MjSASHIUMASTART instead, and this suite is about watching a hand.
+tablesashiuma.SASHIUMA = False
 
 CHECKS = []
 

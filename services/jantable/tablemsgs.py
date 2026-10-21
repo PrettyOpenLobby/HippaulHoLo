@@ -94,11 +94,14 @@ class TableMessages:
                                        round_wind=sc.round_wind, kyoku=sc.kyoku,
                                        honba=sc.honba, dice=sc.dice)
             out.append(self._emit(rec, "deal", to=_s, gallery=gallery_rec))
-        ds = k.wall.dora_shown
-        if isinstance(ds, (list, tuple)):
-            dora = "/".join(narration._tile(t) for t in ds) if ds else "?"
-        else:
-            dora = narration._tile(ds) if ds is not None else "?"
+        # The INDICATORS, not `Wall.dora_shown`: that one is a COUNT (1 at the
+        # deal), and printing it through the tile formatter put "dora=2m" on
+        # every DEAL line ever logged (tile 1 is 2m).
+        try:
+            inds = list(k.wall.dora_indicators())
+        except Exception:                               # noqa: BLE001
+            inds = []
+        dora = "/".join(narration._tile(t) for t in inds) if inds else "?"
         self.trace("DEAL  dealer=%s  dora=%s  wall=%d  [%d record(s), one per "
                    "live seat]"
                    % (self._seatname(k.dealer), dora, self.wall_count(),
@@ -210,7 +213,8 @@ class TableMessages:
                 block[self.MENU_KYUSHU] = 1
         return bytes(block)
 
-    def msg_tsumo(self, seat, motion=None, discard=None):
+    def msg_tsumo(self, seat, motion=None, discard=None, to=None, spectate=True,
+                  viewers=False):
         """Seat `seat`'s state after a draw -- and the turn's ANIMATION.
 
         Every record carries ONE MotionCommand (janmsgs' +0x18 banner,
@@ -254,6 +258,7 @@ class TableMessages:
         menu = self._mymove_menu(seat) if seat in self.live else b"\0" * 7
         slot_flags = None
         auto = 0
+        kuikae_kind = 0
         if h.riichi:
             # A declared riichi may only discard what it drew: offer that slot.
             # The DRAWN tile is the one `Kyoku.draw_for` appended, i.e. the LAST
@@ -294,14 +299,21 @@ class TableMessages:
                 slot_flags[i] |= 1
         elif seat in self.live and h.drawn is None:
             # The turn right after this seat's own chi/pon: the kinds kuikae
-            # forbids lose bit 1 (not discardable) so the picker cannot land
-            # on a tile the engine would refuse.
+            # forbids lose bit 1 (not discardable) so the MENU pickers cannot
+            # land on a tile the engine would refuse.
             forbidden = k.kuikae_forbidden(seat)
             if forbidden:
                 slot_flags = [2 if (i < len(h.tiles)
                                     and mj.kind(h.tiles[i]) not in forbidden)
                               else 0 for i in range(14)]
-        rec = M.tsumo(self.next_seq(), seat, h.tiles, self.wall_count(),
+                kuikae_kind = self._kuikae_wire_kind(h, forbidden)
+        seq = self.next_seq()
+        if discard is None:
+            # The record this seat's MjSUTE answers: the client copies the
+            # sequence byte of the record it is handling into the discard's
+            # +0x13 (console.c:3423, adopted at :4377). See on_sute.
+            self._turn_seq[seat] = seq
+        rec = M.tsumo(seq, seat, h.tiles, self.wall_count(),
                       is_human=self._is_human(),
                       motion=motion, slot_flags=slot_flags,
                       riichi_test=menu,
@@ -318,6 +330,12 @@ class TableMessages:
                       # +0x13a and MjNAKI +0x34 already carry this per seat; the
                       # draw record is the one that was clearing it back to 0.
                       f4b=1 if h.riichi else 0,
+                      # KUIKAE (+0x62, 2004 +0x72): the kind the client itself
+                      # refuses with "鳴きの食い替えは禁止です。" -- see
+                      # `_kuikae_wire_kind`. 0 on every other turn: the client
+                      # compares it against EVERY confirmed pick while +0x63
+                      # is 0, so a stale kind would refuse an ordinary discard.
+                      f62=kuikae_kind,
                       f63=auto,
                       per_seat=tuple(1 if k.hands[s].riichi else 0 for s in range(4)),
                       anim_tile=anim_tile, anim_slot=anim_slot,
@@ -349,9 +367,67 @@ class TableMessages:
         #
         # `seat in self.live` keeps a BOT's draw broadcast, which is what makes
         # a COM's turn visible at all (the motion-2 animation).
-        _to = seat if (discard is None and seat in self.live) else None
-        return self._emit(rec, "draw seat %d" % seat if discard is None
-                          else "discard seat %d" % discard[2], to=_to)
+        # `to` narrows a discard form to one viewer: a HUMAN's discard goes to
+        # the other humans only (`_show_human_discard`).
+        _to = seat if (discard is None and seat in self.live) else to
+        out = self._emit(rec, "draw seat %d" % seat if discard is None
+                         else "discard seat %d" % discard[2], to=_to,
+                         gallery=None if spectate else False)
+        # `viewers`: a NEW wall draw (advance() only). Re-sends after a refused
+        # move, rejoins and rinshan draws would show the other humans a second
+        # draw that never happened.
+        if (viewers and discard is None and motion == 2 and seat in self.live
+                and knobs.VIEWER_DRAW):
+            self._viewer_draws(out, seat, h, anim_tile)
+        return out
+
+    def _viewer_draws(self, parent, seat, h, anim_tile):
+        """The other humans' copy of a human's draw (see knobs.VIEWER_DRAW):
+        the motion-2 animation only, no menu, no slot flags, no auto-discard.
+        Built AFTER the drawer's record so `_turn_seq[seat]` still names the
+        record the drawer's MjSUTE answers. Spectators already get the
+        drawer's own copy, so these are not copied to them."""
+        k = self.kyoku
+        for o in sorted(self.live):
+            if o == seat:
+                continue
+            vrec = M.tsumo(self.next_seq(), seat, h.tiles, self.wall_count(),
+                           is_human=self._is_human(), motion=2,
+                           per_seat=tuple(1 if k.hands[s].riichi else 0
+                                          for s in range(4)),
+                           f4b=1 if h.riichi else 0,
+                           anim_tile=anim_tile, anim_slot=13, anim_seat=seat)
+            self._emit(vrec, "draw seat %d (seen by seat %d)" % (seat, o),
+                       to=o, gallery=False, track=False)
+            # Not returned by msg_tsumo (every caller takes ONE record), so
+            # it rides behind the drawer's record into the outboxes.
+            self.add_rider(parent, vrec)
+
+    @staticmethod
+    def _kuikae_wire_kind(h, forbidden):
+        """The byte MjTSUMO +0x62 (2004 +0x72) carries on the turn right after
+        a chi/pon: the called tile's kind as the client numbers it.
+
+        MEASURED in both builds. 2002 mahdisp.c:3434 loads `+0x62` into
+        _DAT_00451f88 when the draw record arrives, and the discard confirm
+        (mahdisp.c:3655-3672) refuses the pick when `+0x63 == 0` and
+        `(_DAT_00451f88 & 0x3f) == (slot tile & 0x3f)`, printing
+        "喰い換えです" / "鳴きの食い替えは禁止です。" (the 2004 build:
+        fn_002a7600, +0x72/+0x73, strings 0x00494aa8/0x00494ac0). The same
+        global is first set from the call offer (MjNAKI +0x28, console.c:3558),
+        and our post-call MjTSUMO used to overwrite it with 0 -- which is why
+        the client never refused and our engine bounced the tile instead.
+
+        One byte holds one kind, so the called tile (`melds[-1].called`) is
+        the one sent; anything else in `forbidden` only exists with the
+        opt-in `Rules.kuikae_suji`. 0 when there is nothing to say."""
+        try:
+            called = h.melds[-1].called if h.melds else None
+        except Exception:                               # noqa: BLE001
+            called = None
+        if called is None or mj.kind(called) not in forbidden:
+            return 0
+        return M.tile_byte(called) & 0x3F
 
     #: The call menu's per-action byte inside the MjNAKI +0x4c 7-byte block,
     #: measured from the client's static tables (the OpenChoice window's
@@ -493,7 +569,8 @@ class TableMessages:
 
     def msg_alldata(self, subtype=0, discard_event=None, hands=None, ponds=None,
                     call=None, label=None, reveal=None, wanpai=None,
-                    seat_mask=None, seat_flags=None, to=None, emit=True):
+                    seat_mask=None, seat_flags=None, to=None, emit=True,
+                    spectate=True):
         """The whole table. `discard_event=(tile, seat)` makes it a subtype-3
         DRAW+PREP: the client pops the tile onto the seat's hand and CLEARS the
         settled-draw flag of that seat's last pond tile, so a motion-3 record
@@ -541,7 +618,7 @@ class TableMessages:
                      else [] for s in range(4)]
         if ponds is None:
             ponds = [self._pond_wire(s) for s in range(4)]
-        melds = [M.meld_block(k.hands[s].melds) for s in range(4)]
+        melds = [M.meld_block(k.hands[s].melds, seat=s) for s in range(4)]
         meld_types = {s: M.meld_types(k.hands[s].melds) for s in range(4)}
         sc = self._round_scalars()
         ev_tile = ev_seat = ev_present = 0
@@ -600,7 +677,7 @@ class TableMessages:
         return self._emit(rec, label or ("resync" if discard_event is None
                                          else "draw+prep seat %d"
                                          % discard_event[1]), to=to,
-                          gallery=gallery_rec)
+                          gallery=gallery_rec if spectate else False)
 
     #: Which motion animates each granted call (janmsgs' CALL MOTIONS banner).
     #: The three KAN motions are MEASURED (2026-09-04) and driven by `msg_kan()`

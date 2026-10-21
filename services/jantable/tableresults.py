@@ -34,7 +34,14 @@ class TableResults:
         self._recorded = True
         by_seat = {r["seat"]: r for r in rank}
         hako = getattr(self.game, "end_reason", None) == "hako"
-        for seat in sorted(self.live):
+        # DISCONNECT_ADJUST (途中退場後清算, config 23) = Yes: a player who left
+        # mid-game is still SETTLED -- their place and result (penalty
+        # included) go on their record like everyone else's. No (the
+        # default): the exit itself is all that is recorded
+        # (janstats.record_disconnect, at drop time).
+        settled = sorted(set(self.live) | {s for s, d in self.departed.items()
+                                           if d.get("adjust") and d.get("member")})
+        for seat in settled:
             # OUR account number when we hold one (the lobby path seats the
             # PolID as the wire id; the record is keyed by the member).
             member, r = self.member_of_seat(seat), by_seat.get(seat)
@@ -49,6 +56,40 @@ class TableResults:
                 self.log.append(
                     ("stats-error", "seat %d member %r: %s: %s"
                      % (seat, member, type(e).__name__, e)))
+
+    def _apply_disconnect_penalty(self):
+        """DISCONNECT_PENALTY (途中退場ペナルティ料, config 24): each player who
+        left mid-game under a penalty pays it out of their final score, split
+        evenly among the seats that did not leave (the remainder to the best
+        placed of them). Once per game, before the ranking, so places, the
+        +/- points and the JAN all follow the penalised scores. Returns
+        {seat: penalty} for the seats that paid, {} for none.
+
+        OURS: the even split. The client draws the stage for all four seats
+        (+0x58 -> +0x68), which fits points that move between seats, but who
+        received a penalty is not measured."""
+        if self._penalty_applied or self.game is None:
+            return {}
+        self._penalty_applied = True
+        paid = {s: int(d.get("penalty") or 0) for s, d in self.departed.items()
+                if int(d.get("penalty") or 0) > 0}
+        if not paid:
+            return {}
+        scores = self.game.scores
+        stay = [s for s in range(4) if s not in self.departed]
+        for s, p in paid.items():
+            scores[s] -= p
+        pot = sum(paid.values())
+        if stay:
+            share = pot // len(stay)
+            for s in stay:
+                scores[s] += share
+            best = sorted(stay, key=lambda s: (-scores[s], s))[0]
+            scores[best] += pot - share * len(stay)
+        self.trace("PENALTY %s  -> scores=%s  [DISCONNECT_PENALTY, split among %s]"
+                   % (", ".join("seat %d pays %d" % (s, p) for s, p in sorted(paid.items())),
+                      list(scores), stay or "nobody"))
+        return paid
 
     def _history_rows(self, rows=4):
         """Rows 1..4 of `Ranking[5][4]` -- each seat's own recent placings.
@@ -139,6 +180,8 @@ class TableResults:
         conversion is quoted against. +0x58/+0x68 stay RAW SCORES: that stage
         is the score column and its ramp is the scale-free 0x5a one.
         """
+        raw_scores = list(self.game.scores)
+        penalised_by = self._apply_disconnect_penalty()
         rank = self._sashiuma_apply(self.game.ranking())
         self._record_result(rank)
         rules = self.game.rules
@@ -158,10 +201,12 @@ class TableResults:
             sashi[lose] -= stake
         places, scores, points, after_uma, after_yaki, final = ([0] * 4 for _ in range(6))
         money_before, money_after = [0] * 4, [0] * 4
+        penalised = [0] * 4
         for s in range(4):
             r = by_seat[s]
             places[s] = r["place"]
             scores[s] = int(r["score"])
+            penalised[s] = scores[s]
             # Every column below is P. The stage values are the RUNNING TOTAL
             # at each step, so each one is rounded from the exact figure rather
             # than from the previous (already rounded) stage -- that keeps the
@@ -175,7 +220,13 @@ class TableResults:
         blk = bytearray(6)
         for a, b in self.sashiuma_pairs or ():
             blk[M.sashiuma_slot(a, b)] = M.sashiuma_bit(a) | M.sashiuma_bit(b)
-        rec = M.gameresult_half1(self.next_seq(), places=places, scores=scores,
+        # +0x58 -> +0x68 is the client's own penalty stage ("対局中発生した
+        # 切断に対しペナルティを適用します。", fn_002ffc40 in the 2004 build): the
+        # scores BEFORE the disconnect penalty, then after. Equal columns skip
+        # the stage, which is every game nobody left with a penalty on.
+        before = [int(v) for v in raw_scores] if penalised_by else scores
+        rec = M.gameresult_half1(self.next_seq(), places=places, scores=before,
+                                 penalised=penalised,
                                  points=points, after_uma=after_uma,
                                  after_yakitori=after_yaki, final=final,
                                  money_before=money_before,

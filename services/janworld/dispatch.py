@@ -5,8 +5,8 @@ import os
 import struct
 import janwire                                                  # noqa: E402
 from .deps import jangame, janmsgs, janseats
-from . import (builds, galley, notices, opcodes, opener, pushqueue, reservelimits, seating, social,
-               wirelog)
+from . import (builds, galley, gmnotice, notices, opcodes, opener, pushqueue, reservelimits,
+               seating, social, wirelog)
 
 
 # One manager for the whole process: a member's table has to survive across
@@ -66,7 +66,14 @@ def take_pending(member_id, peer="-", limit=None):
     """
     if not member_id:
         return []
-    out = pushqueue._take_pushed(member_id, limit=limit)
+    # The operator's in-room notices and kicks (janworld.gmnotice) ride every
+    # drain, ahead of the lobby queue: they are not tied to any table.
+    try:
+        out = [janwire.encode(r) for r in gmnotice.pending_for(member_id, peer=peer)]
+    except Exception as e:                                      # never fatal
+        wirelog.log("%s   GM notice drain raised: %s" % (peer, e))
+        out = []
+    out += pushqueue._take_pushed(member_id, limit=limit)
     if limit is not None:
         limit -= len(out)
         if limit <= 0:
@@ -82,6 +89,30 @@ def take_pending(member_id, peer="-", limit=None):
         wirelog.log("%s   pending drain raised: %s -- dropping nothing, retrying on "
             "the next line" % (peer, e))
     return out
+
+
+def _holds_seat(tid, member_id):
+    """True when `member_id` already holds a seat at `tid` (a re-sent reserve)."""
+    try:
+        return any(int(m) == int(member_id) for m, _s, _n, _p in janseats.seats_at(tid))
+    except Exception:
+        return False
+
+
+def _wrong_password(rec, tid):
+    """MjPLAYREQ's +0x44 against the table's password; False when the table
+    has none (janrules.table_password)."""
+    try:
+        from .deps import janrules
+        if janrules is None or not hasattr(janrules, "table_password"):
+            return False
+        want = janrules.table_password(tid)
+    except Exception:
+        return False
+    if not want:
+        return False
+    got = galley._cstr(rec, opcodes.PLAYREQ_PASSWORD_OFF, opcodes.PLAYREQ_PASSWORD_LEN)
+    return got != want
 
 
 def _handle_line(line, peer="-", member_id=0):
@@ -200,10 +231,14 @@ def _handle_line(line, peer="-", member_id=0):
                 table = GAMES.spectator_table(member_id)
                 master_seat = social._master_seat_of(getattr(table, "lobby_key", 0))
             else:
-                table = GAMES.table_for(member_id, who)
-                table.seat_player(h["payload"], who, seat=0, member=member_id)
-                table.fill_with_bots()
-            ids = table.member_ids()
+                # NOT AT A TABLE: an EMPTY list, and no table minted. This used
+                # to build a solo table (the asker at seat 0 + three COMs, all
+                # Ready) -- the one-human-vs-COM era -- so the room screen's
+                # table-members box showed "me and three COMs" to everyone not
+                # seated, and every ask left a hidden Table behind (live
+                # 2026-10-09). A game this member is already in still answers.
+                table = GAMES.table_for(member_id, who, create=False)
+            ids = table.member_ids() if table is not None else (0, 0, 0, 0)
         else:
             table, ids = None, (h["payload"], 0, 0, 0)
         # `table` -- NOT omitted. This call site used to pass ids only, so every
@@ -212,7 +247,7 @@ def _handle_line(line, peer="-", member_id=0):
         # recipient's own seat, which promoted every guest who opened the
         # panel. +0x50 is Ready per seat: every seat here is occupied.
         reply = notices.member_list_notice(ids=ids, a=notices.RESULT_OK, b=0, seat=master_seat,
-                                   flags=(1, 1, 1, 1),
+                                   flags=tuple(1 if i else 0 for i in ids),
                                    tail=seating._member_names(ids, table))
         wirelog.log("%s   -> %s  [%dB, %d members]  %s"
             % (peer, wirelog.describe(reply), len(reply), len([s for s in ids if s]),
@@ -315,6 +350,7 @@ def _handle_line(line, peer="-", member_id=0):
         # PTL carries; the asker's registry room qualifies it, so Room 1-1
         # table 1 and Room 2-3 table 1 are two seat sets. See `_table_for`.
         tid = seating._table_for(member_id, h["id8"])
+        call_notices = []
         if h["opcode"] == opcodes.MjPLAYREQ:
             # `h["payload"]` is this client's PolID (+0x18) -- the id it
             # stamps on its own messages and the id MjNOTICEMEMBER's four seat
@@ -329,17 +365,34 @@ def _handle_line(line, peer="-", member_id=0):
             # ENTRY LIMITS FIRST (opt-in, see `reserve_limits_unmet`): a refusal
             # must not move the member off a seat they hold elsewhere.
             unmet = reservelimits.reserve_limits_unmet(member_id, tid) if reservelimits._reserve_limits_on() else 0
+            was_seated = _holds_seat(tid, member_id)
+            wrong_pw = (not was_seated) and _wrong_password(rec, tid)
             if unmet:
                 janseats.note_reserve_tag(member_id, h["f13"])
                 result, seat, extra = reservelimits.RESERVE_LIMIT_RESULT, 0, unmet
                 wirelog.log("%s   member %s misses %s's entry limits (bits 0x%02X) -> "
                     "result 10" % (peer, member_id, seating._tl(tid), unmet))
+            elif wrong_pw:
+                # THE TABLE PASSWORD: the client asked the
+                # player for it because the row's HasPassword field said so
+                # (janlobby.table_has_password) and sent what was typed at
+                # +0x44. A mismatch is result 9, which the client words as
+                # "入力したパスワードが違っています。参加予約ができません。"
+                # (fn_00310fb0). A member already seated there re-affirms
+                # without one (the client re-sends a reserve it did not see
+                # answered).
+                janseats.note_reserve_tag(member_id, h["f13"])
+                result, seat, extra = opcodes.RESERVE_PASSWORD_ERROR, 0, 0
+                wirelog.log("%s   member %s gave the wrong password for %s -> result 9"
+                    % (peer, member_id, seating._tl(tid)))
             else:
                 result, seat, mseat = janseats.reserve(
                     tid, member_id, seating.display_name(member_id, peer),
                     polid=h["payload"], tag=h["f13"], voice=voice,
                                     face=face)
                 extra = ((mseat & 0xF) << 4) | (seat & 0xF)
+                if result == opcodes.RESERVE_GUEST and not was_seated:
+                    call_notices = social.notify_table_call(tid, member_id, peer=peer)
         else:
             janseats.note_reserve_tag(member_id, h["f13"])
             result, seat, extra = janseats.cancel(tid, member_id), 0, 0
@@ -350,6 +403,8 @@ def _handle_line(line, peer="-", member_id=0):
                opcodes.result_name(r["opcode"], reply[0x18]), seating._tl(tid),
                janseats.snapshot().get(str(int(tid)), (0, 0, False))))
         out = [janwire.encode(reply)]
+        # The joiner's MjNOTICECALL goes on its notice queue right after the ACK.
+        out += [janwire.encode(r) for r in call_notices]
         # A cancel by the master promoted somebody: tell the table.
         social.notify_master_changes(peer=peer)
         return out
@@ -366,11 +421,16 @@ def _handle_line(line, peer="-", member_id=0):
             and janseats is not None and janseats.enabled() and member_id):
         # MjLEAVEROOM (22) / MjLEAVECONTENTS (24) / MjLEAVEGAME (29): the
         # member is walking away from wherever their seat was. 29's ACK still
-        # comes from the generic table below. 22 and 24 are FIRE-AND-FORGET
-        # -- roommain.c:146-160 sends MjLEAVEROOM (tagged off a different
-        # counter, `DAT_00449050|0x10`, so no wait-state can even match it)
-        # and falls straight into sqMgCpExitRoom(). Silence is the correct
-        # answer, and it is now a chosen silence rather than "no responder".
+        # comes from the generic table below. In the 2002 build 22 and 24 are
+        # fire-and-forget (roommain.c:146-160 sends MjLEAVEROOM and falls
+        # straight into sqMgCpExitRoom()), so they get a chosen silence.
+        # THE 2004 BUILD WAITS (2026-10-10, a master leaving the room with a
+        # table reserved sat on the spinner until it hung up): TableSelectMain
+        # (0x3BD080) case 0x1D sends MjLEAVEROOM only while it holds a
+        # reservation, and case 0x1E polls wrsCpTgmMoveRoomCheck (0x393CB0) for
+        # MjMOVEACK (26) on queue 5 with +0x13 = the request's f13 and +0x18 in
+        # 1..4 (1 = success); only then does it exit the room and PART. So the
+        # 2004 build is answered with that ACK.
         freed = janseats.release_member(member_id, why=opcodes.opname(h["opcode"]))
         wirelog.log("%s      released member %s's seat(s) on %s%s"
             % (peer, member_id, opcodes.opname(h["opcode"]),
@@ -385,7 +445,28 @@ def _handle_line(line, peer="-", member_id=0):
         if h["opcode"] != opcodes.MjLEAVEGAME:
             # A departing master promoted somebody: tell the survivors.
             social.notify_master_changes(peer=peer)
+            if h["opcode"] == opcodes.MjLEAVEROOM and builds._peer_is_2004(peer):
+                ack = bytearray(janwire.pack(
+                    opcode=opcodes.MjMOVEACK,
+                    f13=h["f13"],                       # the request's tag, echoed verbatim
+                    src=janwire.DST_SERVER & 0xFF,
+                    dst=janwire.DST_REPLY & 0xFF,
+                    sub=opcodes.ACK_SUB,
+                    id8=h["payload"],
+                ))
+                ack[0x18] = 1                           # Success
+                wirelog.log("%s      -> MjMOVEACK (f13=0x%02x, result 1): the 2004 client's"
+                            " room-move check" % (peer, h["f13"]))
+                return [janwire.encode(bytes(ack))]
             return []
+
+    if h["opcode"] == notices.MjNOTICECALLACK:
+        # The client's own answer to MjNOTICECALL (Receive_Notice_00392c60
+        # rewrites the notice in place and sends it back: +0x08 = the +0x18
+        # we sent, i.e. the table). Nothing waits on a reply.
+        wirelog.log("%s      MjNOTICECALLACK from member %s for table %s -- noted, "
+            "nothing to answer" % (peer, member_id, h["id8"]))
+        return []
 
     if h["opcode"] == opcodes.MjENTERROOM:
         # MEASURED 2026-09-09. The post-RESERVE room entry: roommain.c:109
@@ -425,7 +506,37 @@ def _handle_line(line, peer="-", member_id=0):
         # play is answered Success (below) and FLAGGED, so the game manager
         # can resync their seat on the next line -- `janseats.rejoin_pending`.
         _tid = seating._table_for(member_id, h["id8"])
-        if _tid and janseats.is_in_play(_tid) and janseats.mark_rejoin(member_id):
+        _lobby, _members = (seating._lobby_seating(member_id, prefer=_tid)
+                            if _tid else (0, []))
+        _game = (GAMES.by_lobby.get(int(_lobby))
+                 if GAMES is not None and _lobby else None)
+        # WARNING: A FULL TABLE STARTS ITSELF. Measured live 2026-10-17 02:14Z:
+        # the fourth player's reserve filled table 1 and all four clients sent
+        # MjENTERGAME within 30 s with no MjGAMESTART from the master. Nothing
+        # seated the in-game table, so each MjREADY fell back to `table_for`
+        # (one table per member, the sender at seat 0): the master played three
+        # bots and every other seat was REFUSED for stamping its real seat.
+        # The first MjENTERGAME at a full, not-yet-started table does here what
+        # MjGAMESTART does: seat everyone from the store.
+        if (_tid and len(_members) == 4 and not janseats.is_in_play(_tid)
+                and GAMES is not None
+                and os.environ.get("POL_JAN_DRIVE", "1") == "1"):
+            janseats.set_in_play(_tid, member_id)
+            _game = GAMES.table_for_lobby(_lobby, _members,
+                                          seating.display_name(member_id, peer),
+                                          reset=True)
+            _game.self_started = True
+            wirelog.log("%s      MjENTERGAME at a FULL table %s -- the client started it "
+                "itself; seating from the store: %s"
+                % (peer, _lobby, ", ".join("%d=%s" % (st, nm or m)
+                                           for m, st, nm, _p in _members)))
+        elif (_game is not None and getattr(_game, "self_started", False)
+                and getattr(_game, "state", None) == "idle"
+                and _game.seat_of_member(member_id) is not None):
+            # The other three of a self-started table: seated above, nothing
+            # dealt yet, so there is nothing to rejoin or resync.
+            pass
+        elif _tid and janseats.is_in_play(_tid) and janseats.mark_rejoin(member_id):
             wirelog.log("%s      MjENTERGAME on a PLAYING table %s -- rejoin flagged "
                 "for member %s (jangame resyncs on their next line)"
                 % (peer, _tid, member_id))
@@ -496,6 +607,7 @@ def _handle_line(line, peer="-", member_id=0):
                                         "state", None) == "playing")
                 table = GAMES.table_for_lobby(_lobby, _members, who,
                                               reset=not _running)
+                table.self_started = False
                 if _running:
                     wirelog.log("%s      table %s is ALREADY PLAYING -- re-driving the "
                         "notices for member %s rather than restarting the hand"

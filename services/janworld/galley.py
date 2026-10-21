@@ -33,14 +33,18 @@ GALLEY_LEFT = 5
 #: 8). A wrong render is not a refusal-code degradation, so the knob stays
 #: off until the live test in the spec has been run. With it off a Watch is
 #: refused with 7 (the dialog closes), exactly as before.
-GALLERY_ENABLE = os.environ.get("POL_JAN_GALLERY", "0") == "1"
+#: DEFAULT ON now (retail had spectating, and retail behaviour is on by
+#: default). POL_JAN_GALLERY=0 refuses every Watch with
+#: 7 again. Whether a table may be watched is still its master's GALLEY_LIMIT.
+GALLERY_ENABLE = os.environ.get("POL_JAN_GALLERY", "1") == "1"
 #: GALLEY_LIMIT (rule index 20, handlesel.c:977; labels ruleset.c:576-598:
 #: 0 "No", 1 "Yes", 2 "No chat only") is the master's dialog choice and is
 #: NOT enforced by the client (spec section 1.1) -- we refuse 10 for 0 and
-#: drop a spectator's chat for 2. Its shipped default is 0 ("No"), so a
-#: table whose master never opened the rules dialog refuses every Watch.
-#: POL_JAN_GALLEY_LIMIT_DEFAULT=1 (or 2) is the value such a table plays
-#: instead; a master's stored choice always wins over it.
+#: drop a spectator's chat for 2. The client has no default of its own: the
+#: dialog opens on the value janlobby.MJS_RULE_DEFAULT serves, which is 1
+#: ("Yes") since 2026-10-09, so a table whose master never opened the rules
+#: dialog may be watched. POL_JAN_GALLEY_LIMIT_DEFAULT=0 (or 2) is the value
+#: such a table plays instead; a master's stored choice always wins over it.
 GALLEY_LIMIT_DEFAULT = os.environ.get("POL_JAN_GALLEY_LIMIT_DEFAULT", "").strip()
 GALLEY_LIMIT_DEFAULT = int(GALLEY_LIMIT_DEFAULT) if GALLEY_LIMIT_DEFAULT.isdigit() else None
 GALLEY_NO, GALLEY_YES, GALLEY_NO_CHAT = 0, 1, 2
@@ -48,7 +52,8 @@ GALLEY_NO, GALLEY_YES, GALLEY_NO_CHAT = 0, 1, 2
 
 def _gallery_limit(tid):
     """GALLEY_LIMIT for a table: the master's stored choice, else
-    POL_JAN_GALLEY_LIMIT_DEFAULT, else the rule's shipped default (0)."""
+    POL_JAN_GALLEY_LIMIT_DEFAULT, else the served default (1, Yes). With the
+    rule store off no master can choose, so nothing is shown (0)."""
     if janrules is None or not janrules.enabled():
         return GALLEY_LIMIT_DEFAULT if GALLEY_LIMIT_DEFAULT is not None else GALLEY_NO
     try:
@@ -65,7 +70,8 @@ def web_watchable(tid):
     only" (2) -- and never a password table (a web viewer has no password to
     give). It is `_galley`'s consent test for an in-game Watch, without the
     server-wide POL_JAN_GALLERY switch: that gates our in-game gallery
-    feature, not the creator's consent. Default 0 = nothing is shown."""
+    feature, not the creator's consent. A table whose master never chose is
+    watchable (the served default is Yes since 2026-10-09)."""
     if not tid:
         return False
     try:

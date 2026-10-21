@@ -195,7 +195,17 @@ class Rules(object):
         self.agari_yame = kw.get("agari_yame", True)   # dealer in 1st may end on a win
         self.tenpai_yame = kw.get("tenpai_yame", True)  # ...and on a tenpai draw (if it repeats)
         self.sanchahou = kw.get("sanchahou", True)     # three rons abort (else all pay)
-        self.kuikae = kw.get("kuikae", True)           # swap-calling forbidden
+        # KUIKAE: SE's client refuses a swap-call discard ITSELF, with its own
+        # message ("鳴きの食い替えは禁止です。", 0x00494ac0, fn_002a7600 in the
+        # 2004 build / mahdisp.c:3655-3672 in 2002), when the post-call MjTSUMO
+        # names the forbidden kind at +0x62 (2004 +0x72). That field is ONE
+        # tile kind, compared `& 0x3f` against the picked slot, so the retail
+        # rule is the GENBUTSU swap (the called tile's own kind) only. The
+        # suji swap (chi 4-5 on 3, then 6) is `kuikae_suji`, OFF: the client
+        # has no way to be told about a second kind, so forbidding it here
+        # could only bounce the tile back silently.
+        self.kuikae = kw.get("kuikae", True)           # genbutsu swap forbidden
+        self.kuikae_suji = kw.get("kuikae_suji", False)  # ...and the suji swap (OURS)
         self.renhou = kw.get("renhou", True)           # renhou = mangan floor
         self.pao = kw.get("pao", True)                 # sekinin barai
         # IDX_WAIT_TIME, in SECONDS. This one is not decoration: the client's
@@ -1564,13 +1574,15 @@ class Kyoku(object):
         h.drawn = None
         h.rinshan = False
         h.temp_furiten = False
-        # kuikae: not the called tile, nor its suji swap (chi 4-5 on 3: not 6)
+        # kuikae: not the called tile; with `kuikae_suji`, not its suji swap
+        # either (chi 4-5 on 3: not 6). See Rules.kuikae for why suji is off.
         k = kind(tile)
         h.kuikae = {k}
-        if k == ks[0] and ks[2] % 9 != 8:
-            h.kuikae.add(ks[2] + 1)
-        elif k == ks[2] and ks[0] % 9 != 0:
-            h.kuikae.add(ks[0] - 1)
+        if getattr(self.rules, "kuikae_suji", False):
+            if k == ks[0] and ks[2] % 9 != 8:
+                h.kuikae.add(ks[2] + 1)
+            elif k == ks[2] and ks[0] % 9 != 0:
+                h.kuikae.add(ks[0] - 1)
         self._claim_last_discard()
         self.turn = seat
         self.first_go_round = False
@@ -2914,7 +2926,23 @@ def _selftest_fixes(check):
                 "renhou off: the hand's own 2 han (+dora): %r" % wins)
 
     # ---- 9. kuikae ---------------------------------------------------------
+    # The retail rule is the genbutsu swap only (Rules.kuikae): chi 4-5 on 3
+    # forbids 3m and leaves 6m free.
     k = _fresh(37)
+    _give(k, 0, MAN + 2)
+    _give(k, 1, MAN + 3)
+    _give(k, 1, MAN + 4)
+    _give(k, 1, MAN + 5)
+    k.discard(0, tile=next(t for t in k.hands[0].tiles if kind(t) == MAN + 2))
+    h = k.hands[1]
+    k.call_chi(1, (next(t for t in h.tiles if kind(t) == MAN + 3),
+                   next(t for t in h.tiles if kind(t) == MAN + 4)))
+    ok &= check(k.kuikae_forbidden(1) == {MAN + 2},
+                "retail kuikae: chi 4-5 on 3 forbids 3m only: %r" % k.kuikae_forbidden(1))
+    k.discard(1, tile=next(t for t in h.tiles if kind(t) == MAN + 5))
+    ok &= check(kind(k.last_discard) == MAN + 5, "...so the suji 6m may go")
+    # ...and the suji swap as the opt-in it now is
+    k = _fresh(37, Rules(kuikae_suji=True))
     _give(k, 0, MAN + 2)
     _give(k, 1, MAN + 3)
     _give(k, 1, MAN + 4)

@@ -65,14 +65,42 @@ def banish_notice(kicked=0, by=0, kicked_name=b"", by_name=b""):
     return rec[:HEADER_LEN] + bytes(body)
 
 
+def timeup_minutes(rest_seconds):
+    """The byte MjNOTICETIMEUPWARNING carries: whole MINUTES, rounded UP.
+
+    0 seconds (or less) is 0, which the 2004 client prints as "your reservation
+    was cancelled because time ran out"; anything left is at least 1 minute,
+    so a warning never reads as that cancellation. Capped at the byte."""
+    try:
+        s = int(rest_seconds)
+    except (TypeError, ValueError):
+        s = 0
+    if s <= 0:
+        return 0
+    return min(255, -(-s // 60))
+
+
 def timeup_notice(rest_seconds=0):
-    """MjNOTICETIMEUPWARNING. The dispatcher's 0x13 arm (malloc.c:1354-1358)
-    reads ONE field: `_DAT_00446f98 = msg[+0x20] & 0xff` -- +0x20, not +0x18
-    (janmsgs.notice_timeup puts it at +0x18; that byte is never read). The
-    only consumer prints "Rest Time = %d" to the debug log (lmenu.c:2009);
-    there is no on-screen countdown, so this is fidelity, not function."""
+    """MjNOTICETIMEUPWARNING: the seat's time is running out (or has).
+
+    Both builds read ONE field, the byte at +0x20 (not +0x18; the zero-caller
+    janmsgs.notice_timeup puts it at +0x18, which nothing reads):
+
+      2002  malloc.c:1354-1358 stores `msg[+0x20] & 0xff` and the only
+            consumer prints "Rest Time = %d" to the debug log (lmenu.c:2009).
+      2004  Receive_Notice_00392c60 stores it in DAT_00511528 and the lobby
+            notice printer fn_003a80a0 (bit 0x10) prints it on screen:
+            0     -> "時間切れの為に、参加予約がキャンセルされました。"
+                     (0x004b0400, time ran out, reservation cancelled) and
+                     clears the reservation (fn_003a7ff0)
+            n > 0 -> "あなたが参加予約したテーブルは、あと%d分でキャンセル
+                     されます。" (0x004b0440: cancelled in %d MINUTES)
+
+    So the value is MINUTES. `rest_seconds` is converted here
+    (`timeup_minutes`, rounded up), which is what callers holding a TTL in
+    seconds want."""
     body = bytearray(0x28 - HEADER_LEN)
-    struct.pack_into("<I", body, 0x08, int(rest_seconds) & 0xFF)
+    struct.pack_into("<I", body, 0x08, timeup_minutes(rest_seconds))
     rec = janwire.pack(opcode=opcodes.MjNOTICETIMEUPWARNING, length=0x28,
                        src=janwire.DST_SERVER & 0xFF,
                        dst=janwire.DST_CHANNEL & 0xFF, sub=0)
@@ -81,14 +109,122 @@ def timeup_notice(rest_seconds=0):
 
 def serverquit_notice():
     """MjNOTICESERVERQUIT. The dispatcher maps it to bit 0x40 and reads no
-    field; no consumer handles the bit (the ladder in lmenu.c:1992-2020 stops
-    at 0x20), so the client logs TGM_NOTICE_SERVER_QUIT and does nothing.
-    Sent on a graceful shutdown anyway -- it is what SE's server would have
-    sent, and a future client reading it costs us nothing."""
+    field. The 2002 ladder (lmenu.c:1992-2020) stops at 0x20, so that build
+    logs TGM_NOTICE_SERVER_QUIT and does nothing; the 2004 lobby notice
+    printer fn_003a80a0 prints "システムのメンテナンスが開始しました。参加予約は
+    キャンセルされました。" (0x004b0480: maintenance has started, your
+    reservation was cancelled) and clears the reservation. Sent on a graceful
+    shutdown."""
     rec = janwire.pack(opcode=opcodes.MjNOTICESERVERQUIT, length=0x20,
                        src=janwire.DST_SERVER & 0xFF,
                        dst=janwire.DST_CHANNEL & 0xFF, sub=0)
     return rec[:HEADER_LEN] + bytes(0x20 - HEADER_LEN)
+
+
+# --- MjNOTICECALL (16): "your table is waiting" / "the game can start" -------
+#
+# MEASURED in the 2004 build (Receive_Notice_00392c60, jan_00390000.c:2482-
+# 2495): on opcode 0x10 the client ANSWERS by itself -- it rewrites the record
+# as MjNOTICECALLACK (17), len 0x18, +0x08 = our +0x18, src -3 dst -2, +0x16 0,
+# sub 5, and sends it -- and then raises bit 4 when the u32 at +0x20 is 1,
+# bit 0x80 otherwise. The lobby notice printer fn_003a80a0 prints:
+#   bit 0x4   "あなたが参加予約したテーブルがゲーム開始待ちです。" (0x004b0330)
+#             = "the table you reserved is waiting for the game to start"
+#   bit 0x80  "ゲームが開始できます。" (0x004b0370) = "the game can be started"
+# Both only print (their flag DAT_004c42af has no reader). The 2002 build sets
+# a flag nobody reads, so the notice is harmless there.
+MjNOTICECALL, MjNOTICECALLACK = 16, 17
+CALL_WAITING = 1                # +0x20 == 1 -> bit 4, the reserver's line
+CALL_CAN_START = 0              # anything else -> bit 0x80, the master's line
+
+
+def call_notice(waiting, ref=0):
+    """MjNOTICECALL. `waiting` True = "the table you reserved is waiting for
+    the game to start" (a reserver), False = "the game can be started" (the
+    master). `ref` lands at +0x18 and comes back at +0x08 of the client's own
+    MjNOTICECALLACK, so the composite table id goes there."""
+    body = bytearray(0x28 - HEADER_LEN)
+    struct.pack_into("<Q", body, 0x00, int(ref) & 0xFFFFFFFFFFFFFFFF)
+    struct.pack_into("<I", body, 0x08, CALL_WAITING if waiting else CALL_CAN_START)
+    rec = janwire.pack(opcode=MjNOTICECALL, length=0x28,
+                       src=janwire.DST_SERVER & 0xFF,
+                       dst=janwire.DST_CHANNEL & 0xFF, sub=0)
+    return rec[:HEADER_LEN] + bytes(body)
+
+
+# --- the 2004-only server notices 94/95/96 ------------------------------------
+#
+# MEASURED (2004 build, Receive_Notice_00392c60, jan_00390000.c:2433-2450).
+# Each one is acted on only when the u64 at +0x18 is the recipient's own PolID
+# or 0 (0 = everyone):
+#
+#   94 '^' CmNOTICEMSGOPEN       strcpy(0x511530, record + 0x2c) -> bit 0x200;
+#        fn_003a80a0 hands the text to the GMNotice window (GMNotice.cc,
+#        fn_003c37d0 copies it to 0x512ef0, a 0x181-byte buffer), which shows
+#        it for 0x1c20 frames (two minutes), centred when it is under 0x41
+#        bytes and as a scrolling ticker when longer (fn_003c3460/3620).
+#   95 '_' CmNOTICEMSGCLOSE      bit 0x400 -> fn_003c3910: the window closes.
+#   96 '`' CmNOTICEJANHOLOWKICK  bit 0x800 -> sets the exit flags
+#        (_DAT_004c3ea0/_DAT_004c3ea8 = 1), fn_00390600, fn_00319000(7): the
+#        client leaves JongHoLow. This is a SERVER kick out of the title, not
+#        the table master's kick (that one is MjNOTICEBANISH, 15).
+#
+# The 2002 build has no arm for any of them (its dispatcher returns 0 bits), so
+# sending one to a 2002 client does nothing.
+CmNOTICEMSGOPEN, CmNOTICEMSGCLOSE, CmNOTICEJANHOLOWKICK = 94, 95, 96
+GMNOTICE_TEXT_OFF = 0x2C
+#: The receive buffer at 0x511530 runs to the next global at 0x5116b0 (0x180
+#: bytes, NUL included), and the record has to stay inside the size the game
+#: band already carries (MjALLDATA is 0x140), so the text is capped at 255
+#: bytes of cp932 plus its NUL.
+GMNOTICE_TEXT_MAX = 0xFF
+
+
+def _gm_text(text):
+    raw = (text if isinstance(text, (bytes, bytearray))
+           else str(text or "").encode("cp932", "replace"))
+    raw = bytes(raw).split(_NUL, 1)[0]
+    if len(raw) > GMNOTICE_TEXT_MAX:
+        cut = raw[:GMNOTICE_TEXT_MAX]
+        # never end on the first byte of a two-byte cp932 character
+        try:
+            cut.decode("cp932")
+        except UnicodeDecodeError:
+            cut = cut[:-1]
+        raw = cut
+    return raw
+
+
+def gm_notice_open(text, polid=0):
+    """CmNOTICEMSGOPEN: open the in-room notice window with `text`."""
+    raw = _gm_text(text)
+    length = GMNOTICE_TEXT_OFF + len(raw) + 1
+    length += (-length) % 4
+    rec = bytearray(janwire.pack(opcode=CmNOTICEMSGOPEN, length=length,
+                                 src=janwire.DST_SERVER & 0xFF,
+                                 dst=janwire.DST_CHANNEL & 0xFF, sub=0,
+                                 payload=int(polid) & 0xFFFFFFFFFFFFFFFF))
+    rec = rec[:0x20] + bytearray(length - 0x20)
+    rec[GMNOTICE_TEXT_OFF:GMNOTICE_TEXT_OFF + len(raw)] = raw
+    return bytes(rec)
+
+
+def _gm_bare(opcode, polid=0):
+    rec = janwire.pack(opcode=opcode, length=0x20,
+                       src=janwire.DST_SERVER & 0xFF,
+                       dst=janwire.DST_CHANNEL & 0xFF, sub=0,
+                       payload=int(polid) & 0xFFFFFFFFFFFFFFFF)
+    return rec[:0x20]
+
+
+def gm_notice_close(polid=0):
+    """CmNOTICEMSGCLOSE: close the in-room notice window."""
+    return _gm_bare(CmNOTICEMSGCLOSE, polid)
+
+
+def gm_kick(polid=0):
+    """CmNOTICEJANHOLOWKICK: the client leaves JongHoLow."""
+    return _gm_bare(CmNOTICEJANHOLOWKICK, polid)
 
 
 # WARNING: `+0x18` IS A RESULT CODE, AND 0 MEANS OK -- it is NOT a member count.

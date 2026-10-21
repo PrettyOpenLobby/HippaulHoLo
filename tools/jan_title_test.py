@@ -114,6 +114,36 @@ def main():
     check("the game envelope hands the POLpro classes back to the core",
           t.notice(b"L", b"L<DR>\x070", b"", b"X", b"n", b"s", None) is titles.PASS)
 
+    # The auth-band trace names the member and the client kind; an address with no title claim reads as `?` plus the build.
+    check("no member: the auth-band peer stays plain", jantitle._jan_auth_peer(0),
+          "auth-band")
+    peer = jantitle._jan_auth_peer(3)
+    check("a member: auth-band[m3 <kind> <build>]",
+          peer.startswith("auth-band[m3 ") and peer.endswith("]")
+          and ("2002" in peer or "2004" in peer))
+
+    # The ten 2004-only statistics go into a 2004 save after the move.
+    import jansave                                               # noqa: E402
+    os.environ["POL_JAN_SAVE_2004"] = "1"
+    _sg = jantitle._session_get
+    jantitle._session_get = lambda key, *a: 4243 if key == "member_id" else None
+    _ld, _dv = jantitle.janstats.load, jantitle.janstats.derive
+    jantitle.janstats.load = lambda m: {"member": m}
+    jantitle.janstats.derive = lambda rec: {"hand_hands": 12, "hand_wins": 3,
+                                            "hand_called_wins": 1}
+    try:
+        b = jantitle._jan_save_for_build(jantitle.JAN_USERDATA_PATH,
+                                         bytes(jansave.SIZE + jansave.TRAILER))
+        check("a 2004 save carries the hand count at +0x2B4",
+              struct.unpack_from("<I", b, 0x2B4)[0], 12)
+        check("...the wins at +0x2BC and the called wins at +0x2F0",
+              (struct.unpack_from("<I", b, 0x2BC)[0],
+               struct.unpack_from("<I", b, 0x2F0)[0]), (3, 1))
+    finally:
+        jantitle._session_get = _sg
+        jantitle.janstats.load, jantitle.janstats.derive = _ld, _dv
+        os.environ.pop("POL_JAN_SAVE_2004", None)
+
     print(f"\n{checks - len(fails)}/{checks} checks passed"
           + (f", {len(fails)} FAILED" if fails else ""))
     sys.exit(1 if fails else 0)

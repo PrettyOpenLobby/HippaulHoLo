@@ -80,10 +80,24 @@ def rules_key():
     return _key("POL_JAN_RULES_KEY", "jan:rules")
 
 
+def gmnotice_key():
+    """The server's in-room notice (CmNOTICEMSGOPEN/CLOSE) and kick
+    (CmNOTICEJANHOLOWKICK) posts: an operator tool writes, the game band
+    delivers (janworld.gmnotice)."""
+    return _key("POL_JAN_GMNOTICE_KEY", "jan:gm-notice")
+
+
 def roomkey_key():
     """The observed room key -> channel cache (janlobby), a hash. Was
     <POL_DATA_DIR>/jan-room-keys.json."""
     return _key("POL_JAN_ROOMKEY_KEY", "jan:room-keys")
+
+
+def ptl_unplaced_key():
+    """Members whose last `b/g/PTL` was the unknown-room fallback (janlobby
+    `note_ptl_unplaced`), a hash member -> unix time. login writes, the
+    authsess `<DR>` answer reads and clears it."""
+    return _key("POL_JAN_PTL_UNPLACED_KEY", "jan:ptl-unplaced")
 
 
 def watch_key():

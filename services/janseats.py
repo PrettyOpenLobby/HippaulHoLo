@@ -468,6 +468,8 @@ def resolve_table(member_id, wire_id=0, room=None):
 
 _SEQ = {}               # room (str) -> the room's delta sequence
 _DELTAS = {}            # room (str) -> [[seq, composite table id], ...] oldest first
+#                         (a MEMBER delta is [seq, 0, "PD"|"PC", values])
+_ROSTER = {}            # room (str) -> {member (str): [name, level, profile]}
 _ROWS = {}              # composite table id (str) -> [seat count, in_play] as last sent
 
 
@@ -556,6 +558,10 @@ def _adopt():
     for mem, prefs in (disk.get("members") or {}).items():
         if isinstance(prefs, dict):
             _MEMBERS.setdefault(str(mem), prefs)
+    if not _ROSTER:
+        for k, v in (disk.get("roster") or {}).items():
+            if isinstance(v, dict):
+                _ROSTER[_rk(k)] = {str(m): list(r) for m, r in v.items()}
 
 
 def _publish(force=True):
@@ -583,7 +589,8 @@ def _publish(force=True):
         with _LOCK:
             doc = json.loads(json.dumps({"v": 2, "tables": _TABLES, "seq": _SEQ,
                                          "deltas": _DELTAS, "rows": _ROWS,
-                                         "members": _MEMBERS}))
+                                         "members": _MEMBERS,
+                                         "roster": _ROSTER}))
         _SHARED.key = _path()
         _SHARED.write(doc)                  # one SET: readers see all or nothing
     except Exception as exc:                # noqa: BLE001 -- Valkey away
@@ -761,6 +768,72 @@ def reconcile():
         return n
 
 
+#: The PTL member record's id for a member: `janlobby.PTL_MEMBER_ID_BASE |
+#: member`, the id the snapshot row carries and a `PD`/`PC` must match.
+ROSTER_ID_BASE = 0x1000000000000000
+
+
+def roster_values(member, name, level, profile):
+    """The eleven `PD` values for one room-list row -- the same fields the
+    `b/g/PTL` snapshot writes (`janlobby.ptl_blob`): value 0 = the row id
+    (+0x00), 1 = the profile id (+0x18), 4 = the name (+0x28), 7 = the level
+    (+0x1C). The rest stay 0/empty, as they are in the snapshot. Order per
+    `lb__002f9ab8` (hippaulmaster tmroom._FIELDS)."""
+    return ["0x%016X" % (ROSTER_ID_BASE | int(member)), str(int(profile or 0)),
+            "0", "0", str(name or "")[:15], "0", "0", str(int(level or 1)),
+            "0", "0", ""]
+
+
+def sync_roster(room, members):
+    """Bring `room`'s member list up to date: `members` is who is in the
+    room's channel now, `[(member id, name, level, profile id)]`. Each change
+    against the list last seen becomes a delta in the room's sequence -- `PD`
+    (add or update the row, cp__002fb290 command 0x13) or `PC` (remove it by
+    id, command 0x14) -- so a client polling `<DR>` sees people come and go
+    without a reload. Returns the number of deltas added.
+
+    WARNING: THE ROOM LIST USED TO BE SNAPSHOT-ONLY (2026-10-10, live). The
+    sequence moved for TABLE changes alone, so a player who came back from a
+    game never appeared in the list of someone already in the room until that
+    client re-fetched `b/g/PTL`. The first sight of a room only records it:
+    the snapshots already served hold those members."""
+    if not enabled():
+        return 0
+    now = {}
+    for m, name, level, profile in members:
+        try:
+            m = int(m or 0)
+        except (TypeError, ValueError):
+            continue
+        if m > 0:
+            now[str(m)] = [str(name or ""), int(level or 1), int(profile or 0)]
+    with _LOCK:
+        _adopt()
+        rk = _rk(room)
+        was = _ROSTER.get(rk)
+        if was == now:
+            return 0
+        _ROSTER[rk] = now
+        if was is None:
+            _publish()
+            return 0
+        log_ = _DELTAS.setdefault(rk, [])
+        bumps = 0
+        for m in sorted(set(was) - set(now), key=int):
+            _SEQ[rk] = int(_SEQ.get(rk, 0)) + 1
+            log_.append([_SEQ[rk], 0, "PC",
+                         ["0x%016X" % (ROSTER_ID_BASE | int(m))]])
+            bumps += 1
+        for m in sorted(now, key=int):
+            if was.get(m) != now[m]:
+                _SEQ[rk] = int(_SEQ.get(rk, 0)) + 1
+                log_.append([_SEQ[rk], 0, "PD", roster_values(int(m), *now[m])])
+                bumps += 1
+        del log_[:-DELTA_WINDOW]
+        _publish()
+        return bumps
+
+
 def expiring_seats(now=None):
     """[(table id, member, seconds left)] for seats inside the warning window
     that have not been warned yet -- MjNOTICETIMEUPWARNING's feed. Marks them
@@ -835,7 +908,10 @@ def deltas_after(have, room=0):
     for i, d in enumerate(want):
         if int(d[0]) != have + 1 + i:
             return None                 # a gap is a permanent stall
-    return [(int(d[0]), int(d[1])) for d in want]
+    # A table delta is (seq, composite id); a MEMBER delta (sync_roster) is
+    # (seq, 0, tag, values).
+    return [(int(d[0]), int(d[1])) if len(d) < 4
+            else (int(d[0]), 0, str(d[2]), list(d[3])) for d in want]
 
 
 # --- the writer API (auth band) ----------------------------------------------
@@ -889,6 +965,11 @@ def reserve(table_id, member_id, name="", polid=0, tag=None, voice=None,
         seat = _free_seat(seats)
         if seat is None:
             return RESERVE_FULL, 0, _master_seat(entry)
+        if not seats:
+            # The first body at a VACANT table (its seats all released, or
+            # all aged out without anyone writing): it sets the table up
+            # from the defaults, not from the last occupant's rules.
+            _forget_rules(table_id)
         if not entry.get("master"):
             # First body in -- or the first one after a master cancelled out
             # from under the table -- runs it. WARNING: Note the master's SEAT is then
@@ -1060,6 +1141,37 @@ def _master_seat(entry):
     return int(s["seat"]) if s else 0
 
 
+#: THE TABLE'S RULES GO WITH ITS LAST PLAYER.
+#: The rule store used to keep a table's 33 values for ever, and the client
+#: opens the rules dialog on whatever the table record serves, so one master's
+#: "Until East 1" (table 1, 09-12) was re-confirmed by every master after him
+#: for a month: 15 of 23 finished games were one hand long. SE's server did not
+#: keep a table's settings between occupants in anything the client shows us:
+#: the dialog's own "麻雀ルールを初期設定に戻します" button resets to the
+#: record's defaults, and the room row's states run 0 (vacant) -> 1 (the master
+#: is setting the table up) -> 2 recruiting, i.e. a new master SETS UP a vacant
+#: table. So a table that empties forgets its rules, and the next master starts
+#: from MJS_RULE_DEFAULT. OURS where unmeasured: the exact moment (the last
+#: seat released, or a first seat taken at a table whose seats all expired).
+#: A master leaving a table that still has players keeps the rules (the table
+#: did not empty; the new master can change them).
+#:     POL_JAN_RULES_RESET  "empty" (default) | "never" (the old behaviour)
+def _rules_reset_on():
+    return os.environ.get("POL_JAN_RULES_RESET", "empty").strip().lower() != "never"
+
+
+def _forget_rules(tid):
+    """Drop `tid`'s stored rules. Never raises: a seat change must not fail
+    because the rule store is away."""
+    if not _rules_reset_on():
+        return False
+    try:
+        import janrules
+        return bool(janrules.clear(int(tid)))
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
 def _release(tid, member_id, why="left"):
     entry = _TABLES.get(str(tid))
     if not entry:
@@ -1080,6 +1192,7 @@ def _release(tid, member_id, why="left"):
     if not entry["seats"]:
         entry["in_play"] = 0.0
         entry["gallery"] = {}           # nothing left to watch
+        _forget_rules(tid)              # the table is vacant: see _rules_reset_on
     return True
 
 
@@ -1771,6 +1884,32 @@ def selftest():
         check("table_channel: a room too wide for 3 digits is hexed, never "
               "overruns", len(table_channel(room_table_id(4095, 4))) <= TABLE_CHAN_MAX
               and table_channel(room_table_id(4095, 4)) == "#MJS0TFFF004")
+
+        # --- the room's MEMBER list rides the same sequence (2026-10-10) ---
+        _ROSTER.clear()
+        s0 = sequence(101)
+        check("roster: the first sight of a room records it, no delta",
+              sync_roster(101, [(3, "Lex", 2, 30)]) == 0 and sequence(101) == s0)
+        check("roster: an unchanged room adds nothing",
+              sync_roster(101, [(3, "Lex", 2, 30)]) == 0)
+        n = sync_roster(101, [(3, "Lex", 2, 30), (17, "Ardenvale", 1, 170)])
+        d = deltas_after(s0, 101)
+        check("roster: an arrival is ONE PD carrying the snapshot's row id, "
+              "name and level",
+              n == 1 and len(d) == 1 and d[0][2] == "PD"
+              and d[0][3][0] == "0x%016X" % (ROSTER_ID_BASE | 17)
+              and d[0][3][4] == "Ardenvale" and d[0][3][7] == "1"
+              and len(d[0][3]) == 11)
+        s1 = sequence(101)
+        sync_roster(101, [(17, "Ardenvale", 1, 170)])
+        d = deltas_after(s1, 101)
+        check("roster: a departure is ONE PC naming the row id",
+              len(d) == 1 and d[0][2] == "PC"
+              and d[0][3] == ["0x%016X" % (ROSTER_ID_BASE | 3)])
+        check("roster: a ghost (member 0) never enters the list",
+              sync_roster(101, [(17, "Ardenvale", 1, 170), (0, None, 1, 0)]) == 0)
+        check("roster: another room's sequence did not move",
+              deltas_after(sequence(203), 203) == [])
 
         os.environ.pop("POL_JAN_SEATS_KEY", None)
 

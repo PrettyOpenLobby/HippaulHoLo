@@ -354,6 +354,12 @@ INSERT_AT_2004 = 0x240
 INSERT_LEN_2004 = SIZE_2004 - SIZE                                  # 72
 
 
+def _rank_2004(idx):
+    """`janstats.rank_index_2004`; a save authored without janstats carries
+    rank 0, which is the same on both ladders."""
+    return janstats.rank_index_2004(idx) if janstats is not None else 0
+
+
 def to_2004(blob):
     """A 2002-layout save (976, or 980 with the trailer slot) as the 2004
     build reads it: 1048 bytes, plus the trailer slot when one came in.
@@ -373,8 +379,51 @@ def to_2004(blob):
     out = bytearray(body[:INSERT_AT_2004] + bytes(INSERT_LEN_2004)
                     + body[INSERT_AT_2004:])
     struct.pack_into("<I", out, MAGIC_OFF, MAGIC_2004)
+    # The rank keeps its offset but not its numbering: the 2004 ladder is
+    # 19 x 7 (janstats.RANK_VARIANTS_2004), and a 2002 index draws a blank.
+    off = FIELDS["rank"]["off"]
+    struct.pack_into("<I", out, off, _rank_2004(struct.unpack_from("<I", out, off)[0]))
     assert len(out) == SIZE_2004
     return bytes(out) + tail
+
+
+#: THE TEN 2004-ONLY u32s (measured 2026-10-08): the statistics page
+#: fn_0032fcc0 reads them at save buffer 0x004c42d0 + offset, and every one is
+#: a count or a sum it turns into a rate or an average (janstats.HAND_STAT_KEYS
+#: says which). They sit inside the 72 bytes the 2004 layout inserted: the
+#: insertion is at 2002 +0x2B4 (the last field of the block, +0x2F0, ends at
+#: +0x2F4 and the first moved 2002 field, +0x2b6, lands at +0x2fe), and since
+#: everything this server authors in [+0x240, +0x2B4) is zero, `to_2004`'s
+#: choice of +0x240 produces the same bytes.
+#:
+#:     +0x2B4 hands        +0x2BC wins          +0x2C0 win_max
+#:     +0x2C4 win_points   +0x2C8 tsumo_wins    +0x2CC deal_ins
+#:     +0x2E4 riichi       +0x2E8 riichi_junme  +0x2EC called_hands
+#:     +0x2F0 called_wins
+#:
+#: +0x2B8 and +0x2D0..+0x2E0 have no reader in the page and stay zero.
+STATS_2004 = {
+    "hand_hands": 0x2B4, "hand_wins": 0x2BC, "hand_win_max": 0x2C0,
+    "hand_win_points": 0x2C4, "hand_tsumo_wins": 0x2C8, "hand_deal_ins": 0x2CC,
+    "hand_riichi": 0x2E4, "hand_riichi_junme": 0x2E8,
+    "hand_called_hands": 0x2EC, "hand_called_wins": 0x2F0,
+}
+
+
+def apply_stats_2004(blob, values):
+    """Write the ten statistics (`janstats.derive` keys `hand_*`) into a
+    2004-layout save. Returns the new blob; a 2002-sized blob is returned
+    untouched (it has no room for them and no reader)."""
+    if len(blob) < SIZE_2004:
+        return blob
+    out = bytearray(blob)
+    for key, off in STATS_2004.items():
+        try:
+            v = int(values.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            v = 0
+        struct.pack_into("<I", out, off, max(0, min(v, 0xFFFFFFFF)))
+    return bytes(out)
 
 
 def is_2004_version(version):
@@ -742,7 +791,14 @@ def selftest_2004():
     p4 = to_2004(bytes(probe))
     for i, (_old, new) in enumerate(moved):
         assert p4[new] == 0x80 + i, hex(new)
-    assert p4[4:INSERT_AT_2004] == bytes(probe)[4:INSERT_AT_2004]
+    rk = FIELDS["rank"]["off"]
+    assert (p4[4:rk] + p4[rk + 4:INSERT_AT_2004]
+            == bytes(probe)[4:rk] + bytes(probe)[rk + 4:INSERT_AT_2004])
+    if janstats is not None:
+        r6 = bytearray(base)
+        struct.pack_into("<I", r6, rk, 6)           # tier 1 "rich" on 2002
+        assert struct.unpack_from("<I", to_2004(bytes(r6)), rk)[0] == 8, \
+            "rank 6 must land on the 2004 ladder's tier 1 'rich' (8)"
     assert is_2004_version("20040727_2") and not is_2004_version("20020314_0")
     assert not is_2004_version("20030909_0") and not is_2004_version("20260909_0")
     print("  ok   2004 layout: magic, length and the ten moved fields")
