@@ -8,7 +8,9 @@ Three made-up players: Lex and Mira seated at one table that is being played, Ar
 it. Checks the token, the description (three pages, the three actions with the panel's kinds),
 the status, every page without a script, a notice and a close landing in jan:gm-notice as
 janworld.gmnotice delivers them, a kick by handle, by POL ID and from the Tables page posted for
-the right member, and the event operations janevent.py has (open by hand, close, the schedule).
+the right member, the event operations janevent.py has (open by hand, close, the schedule),
+and the account window's player lookup (a seated player online at their table; nothing for a
+member with no record, and nothing sensitive).
 Throwaway PostgreSQL (janpg.py); the live keys are this process's own store.
 """
 import json
@@ -226,6 +228,37 @@ try:
           "opened" in body and rec["id"] == 2 and rec["name"] == "Weekend Cup" and rec["auto"], rec)
 finally:
     janevent._calendar = keep_cal
+
+print("one player, for the account window")
+check("the description says it answers for a player", desc.get("player") is True, desc)
+
+
+def player(**q):
+    st, body = get("/openlobby/player.json?" + urllib.parse.urlencode(q))
+    return st, json.loads(body)
+
+
+st, doc = player(polid="", handles="lex", members="")
+ch = (doc.get("characters") or [{}])[0]
+facts = {f["label"]: f["value"] for f in ch.get("facts") or []}
+check("a player by handle (any case): level, rank, rating, games, first places, JAN",
+      st == 200 and len(doc["characters"]) == 1 and ch["name"] == "Lex"
+      and facts == {"level": "1", "rank": "tier 1 of 19", "rating": "8.80", "games": "3",
+                    "first places": "2", "JAN": "90,000"}, doc)
+check("...seated now, so online, with the table named", ch["online"] is True
+      and ch["detail"] == "Lv 1, 3 games, at Room 1-1, Table 1", ch)
+st, doc2 = player(polid="jantest01", handles="", members="")
+check("the same player by POL ID", doc2.get("characters") == doc["characters"], doc2)
+st, doc3 = player(polid="", handles="", members="%d,%d" % (LEX, MIRA))
+check("several members at once, each its own entry",
+      [c["name"] for c in doc3.get("characters") or []] == ["Lex", "Mira"], doc3)
+st, none = player(polid="", handles="Arden", members="")
+check("a member with no record is nothing", st == 200 and none == {}, none)
+st, none = player(polid="NOBODY00", handles="Marigold", members="")
+check("an account the game never saw is nothing", none == {}, none)
+text = json.dumps(doc3)
+check("nothing sensitive in the answer",
+      not any(s in text.lower() for s in ("jantest01", "password", "session", "token", "127.0.0.1")), text)
 
 port.stop()
 print("janadmin_test: %s" % ("all checks passed" if not fails else "%d FAILED" % len(fails)))

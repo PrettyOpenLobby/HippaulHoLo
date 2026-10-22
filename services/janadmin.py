@@ -29,6 +29,10 @@ The panel gets three pages, each its own moderator permission:
 and three actions with the ids, kinds and fields the panel's own module had (adminmodules/jan.py):
 notice (announce, text), close, and kick (kick, handles; an account's Kick sends polid too).
 
+The account window's "In the games" asks it about one player (player.json): each of the
+account's members with a player record (janstats), by handle, with its level, rank tier,
+rating, games, first places and JAN, and the table it sits at now.
+
 Every change is logged here and, through the panel, in the panel's activity log with the
 moderator's name.
 """
@@ -290,6 +294,51 @@ def tables(now=None):
 
 
 # --------------------------------------------------------------------------- #
+# one player, for the panel's account window
+# --------------------------------------------------------------------------- #
+def player(who):
+    """What JongHoLow knows of one account: one entry per member with a player record
+    (janstats), named by its handle, with its level, rank, rating, games and JAN, and where it
+    sits or watches now -> {"characters": [...]} or None when none has played."""
+    import janstats
+    ids = {int(str(m).strip()) for m in who.get("members") or [] if str(m).strip().isdigit()}
+    ids |= set(members_for(who.get("polid") or "", ",".join(who.get("handles") or [])))
+    ids = sorted(m for m in ids if janstats.stats_exists(m))
+    if not ids:
+        return None
+    names = names_of(ids)
+    where = {}
+    try:
+        for t in tables():
+            for _seat, mid, _name in t["seats"]:
+                where.setdefault(mid, "at " + t["label"])
+    except Exception:                                   # noqa: BLE001 -- the tables are a nicety
+        where = None
+    chars = []
+    for mid in ids:
+        rec = janstats.load(mid)
+        d = janstats.derive(rec)
+        games = int(d["games_played"])
+        places = rec.get("places") or [0, 0, 0, 0]
+        tier = int(d["rank"]) // janstats.RANK_VARIANTS + 1
+        facts = [{"label": "level", "value": str(d["level"])},
+                 {"label": "rank", "value": "tier %d of %d" % (tier, janstats.RANK_TIERS)},
+                 {"label": "rating", "value": "%.2f" % janstats.rating_of(rec)},
+                 {"label": "games", "value": "{:,}".format(games)},
+                 {"label": "first places", "value": "{:,}".format(int(places[0]))},
+                 {"label": "JAN", "value": "{:,}".format(int(d["money"]))}]
+        seat = where.get(mid) if where is not None else None
+        chars.append({"name": names.get(mid) or str(rec.get("name") or "") or "member %d" % mid,
+                      "detail": ", ".join(x for x in ("Lv %d" % d["level"],
+                                                      "%d game%s" % (games, "" if games == 1 else "s"),
+                                                      seat) if x),
+                      # seated is known; not seated may still be in the lobby, so unknown
+                      "online": True if seat else None,
+                      "facts": facts})
+    return {"characters": chars, "note": ""}
+
+
+# --------------------------------------------------------------------------- #
 # the pages
 # --------------------------------------------------------------------------- #
 def events_page(note=None):
@@ -442,6 +491,8 @@ def build():
         if online is not None:
             doc["online"] = online
         return doc
+
+    port.player(player)
 
     @port.tool("events", "Events", "events")
     def events(method, sub, query, body, actor):
